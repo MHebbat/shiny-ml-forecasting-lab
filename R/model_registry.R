@@ -2,10 +2,15 @@
 # Model Registry
 # Each model entry exposes:
 #   id, label, engine ("R" | "Python"), task_types, description,
+#   best_for (character vector), avoid_when (character vector),
+#   long_doc (markdown string for the documentation drawer),
+#   reference_url, dependencies (character vector of pkg/python module hints),
+#   beta (logical, optional), groups (named list mapping
+#     "Section title" -> character vector of param names),
 #   params (list of UI specs),
 #   available (function() -> list(ok=bool, msg=character)) — optional,
 #     used by the Model Lab UI to show inline missing-dependency notices.
-#   fit(df, target, params, time_col=NULL) -> list(model=..., predict=function(newdata, h)..., feat_imp=...)
+#   fit(df, target, params, time_col=NULL) -> list(model=..., predict=function(newdata, h)..., feat_imp=..., diagnostics=list(...))
 #
 # Author: Malik Hebbat
 # =====================================================================
@@ -71,6 +76,39 @@ avail_python <- function(mod, hint = NULL) {
   if (s %in% c("T","TRUE","YES","Y","1")) return(TRUE)
   if (s %in% c("F","FALSE","NO","N","0")) return(FALSE)
   NA
+}
+
+# Parse a layer-width spec like "[12, 5, 1]" or "12, 5, 1" -> integer vector.
+# Substitutes the literal token "n_features" with the runtime value when given.
+.parse_layer_widths <- function(txt, n_features = NULL) {
+  if (is.null(txt)) return(NULL)
+  s <- trimws(as.character(txt))
+  if (!nzchar(s)) return(NULL)
+  s <- gsub("[\\[\\]\\(\\) ]", "", s, perl = TRUE)
+  if (!is.null(n_features) && is.finite(n_features)) {
+    s <- gsub("n_features", as.character(as.integer(n_features)), s,
+              ignore.case = TRUE)
+  }
+  parts <- strsplit(s, "[,;]")[[1]]
+  v <- suppressWarnings(as.integer(parts))
+  v <- v[!is.na(v) & v > 0]
+  if (length(v) == 0) NULL else v
+}
+
+# Build sequence (X, y) tensors for LSTM training from a numeric vector.
+# Returns list(X = [N x T x 1], y = [N], idx_last = N) suitable for keras.
+.lstm_make_supervised <- function(y, timesteps) {
+  y <- as.numeric(y)
+  n <- length(y)
+  if (n <= timesteps) stop("LSTM: series too short for the requested timesteps")
+  N <- n - timesteps
+  X <- array(0, dim = c(N, timesteps, 1L))
+  yy <- numeric(N)
+  for (i in seq_len(N)) {
+    X[i, , 1] <- y[i:(i + timesteps - 1L)]
+    yy[i]     <- y[i + timesteps]
+  }
+  list(X = X, y = yy)
 }
 
 # ---- Model implementations -------------------------------------------
@@ -510,6 +548,273 @@ fit_catboost_py <- function(df, target, params, time_col = NULL, classification 
       out$predictions
     },
     feat_imp = NULL
+  )
+}
+
+# ---- LSTM (deep learning) --------------------------------------------
+# Two backends:
+#   - keras: full-featured (preferred). Uses R `keras` package + Python TF.
+#   - TSLSTMplus: univariate convenience fallback for time series only.
+# fit_lstm dispatches between them based on availability and task.
+fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  task <- if (classification) "classification" else "time_series"
+
+  use_keras <- .has("keras")
+  use_tslstm <- .has("TSLSTMplus")
+
+  timesteps <- as.integer(params$timesteps %||% 12)
+  bidirectional <- isTRUE(params$bidirectional %||% FALSE)
+  units <- as.integer(params$units %||% 64)
+  layers_n <- as.integer(params$layers %||% 1)
+  dropout <- as.numeric(params$dropout %||% 0)
+  rdrop <- as.numeric(params$recurrent_dropout %||% 0)
+  batch <- as.integer(params$batch_size %||% 32)
+  epochs <- as.integer(params$epochs %||% 100)
+  lr <- as.numeric(params$learning_rate %||% 1e-3)
+  opt <- as.character(params$optimizer %||% "adam")
+  loss_in <- as.character(params$loss %||% "auto")
+  patience <- as.integer(params$early_stopping_patience %||% 10)
+  sched <- as.character(params$lr_scheduler %||% "none")
+  stateful <- isTRUE(params$stateful %||% FALSE)
+  return_sequences <- isTRUE(params$return_sequences %||% FALSE)
+  seed <- as.integer(params$seed %||% 42)
+
+  loss_for_task <- function() {
+    if (loss_in != "auto" && nzchar(loss_in)) return(loss_in)
+    if (classification) "sparse_categorical_crossentropy" else "mse"
+  }
+
+  # ---- Path 1: keras --------------------------------------------------
+  if (use_keras) {
+    out <- tryCatch({
+      y_raw <- df[[target]]
+      if (classification) {
+        # Treat as sequence classification on a flat numeric matrix; for now
+        # we only support univariate sequences (target supervised by lagged
+        # features). Encode classes for sparse loss.
+        classes <- sort(unique(stats::na.omit(y_raw)))
+        y_idx <- match(y_raw, classes) - 1L
+        # Build features: lagged target values (flat tabular if available)
+        feat_cols <- setdiff(names(df), target)
+        X_tab <- if (length(feat_cols) > 0)
+          as.matrix(as.data.frame(lapply(df[, feat_cols, drop = FALSE],
+            function(c) if (is.factor(c)||is.character(c))
+              as.integer(as.factor(c)) else as.numeric(c))))
+        else
+          matrix(seq_along(y_idx), ncol = 1)
+        n_features <- max(1L, ncol(X_tab))
+        # Reshape to [samples, timesteps=1, n_features]
+        Xtr <- array(as.numeric(X_tab), dim = c(nrow(X_tab), 1L, n_features))
+        ytr <- as.integer(y_idx)
+        n_classes <- length(classes)
+
+        keras::use_session_with_seed(seed, disable_parallel_cpu = FALSE)
+        inp <- keras::layer_input(shape = c(1L, n_features))
+        z <- inp
+        for (li in seq_len(layers_n)) {
+          rs <- if (li < layers_n) TRUE else return_sequences
+          rec <- keras::layer_lstm(units = units, return_sequences = rs,
+                                   dropout = dropout,
+                                   recurrent_dropout = rdrop,
+                                   stateful = stateful)
+          z <- if (bidirectional) keras::bidirectional(z, rec) else rec(z)
+        }
+        out_layer <- keras::layer_dense(units = n_classes, activation = "softmax")
+        out_t <- out_layer(z)
+        model <- keras::keras_model(inp, out_t)
+        opt_obj <- switch(opt,
+          "sgd"   = keras::optimizer_sgd(learning_rate = lr),
+          "rmsprop" = keras::optimizer_rmsprop(learning_rate = lr),
+          "adamw" = if (utils::packageVersion("keras") >= "2.10")
+                       keras::optimizer_adam(learning_rate = lr)
+                    else keras::optimizer_adam(learning_rate = lr),
+          keras::optimizer_adam(learning_rate = lr))
+        model$compile(optimizer = opt_obj,
+                      loss = loss_for_task(),
+                      metrics = list("accuracy"))
+        cb <- list()
+        if (patience > 0)
+          cb <- c(cb, list(keras::callback_early_stopping(
+            monitor = "loss", patience = patience,
+            restore_best_weights = TRUE)))
+        if (sched == "reduce_on_plateau")
+          cb <- c(cb, list(keras::callback_reduce_lr_on_plateau(
+            monitor = "loss", patience = max(1L, patience %/% 2L))))
+        hist <- model$fit(Xtr, ytr, epochs = epochs, batch_size = batch,
+                          verbose = 0L, callbacks = cb)
+        train_cols <- if (length(feat_cols) > 0) feat_cols else NULL
+
+        list(model = model,
+             predict = function(newdata, h = NULL) {
+               if (length(feat_cols) > 0) {
+                 keep <- intersect(feat_cols, colnames(newdata))
+                 nx <- as.data.frame(lapply(newdata[, keep, drop = FALSE],
+                   function(c) if (is.factor(c)||is.character(c))
+                     as.integer(as.factor(c)) else as.numeric(c)))
+                 # Pad missing columns with 0
+                 for (m in setdiff(feat_cols, keep)) nx[[m]] <- 0
+                 nx <- nx[, feat_cols, drop = FALSE]
+                 Xn <- array(as.numeric(as.matrix(nx)),
+                             dim = c(nrow(nx), 1L, n_features))
+               } else {
+                 Xn <- array(seq_len(nrow(newdata)),
+                             dim = c(nrow(newdata), 1L, 1L))
+               }
+               probs <- model$predict(Xn, verbose = 0L)
+               idx <- apply(probs, 1, which.max)
+               classes[idx]
+             },
+             feat_imp = NULL,
+             diagnostics = list(
+               backend = "keras",
+               epochs_run = length(hist$history$loss %||% list()),
+               final_loss = utils::tail(hist$history$loss %||% list(NA), 1)[[1]],
+               history = hist$history))
+      } else {
+        # Time series / regression-on-sequence
+        y <- as.numeric(df[[target]])
+        sup <- .lstm_make_supervised(y, timesteps)
+        n_features <- 1L
+
+        keras::use_session_with_seed(seed, disable_parallel_cpu = FALSE)
+        inp <- keras::layer_input(shape = c(timesteps, n_features))
+        z <- inp
+        for (li in seq_len(layers_n)) {
+          rs <- if (li < layers_n) TRUE else return_sequences
+          rec <- keras::layer_lstm(units = units, return_sequences = rs,
+                                   dropout = dropout,
+                                   recurrent_dropout = rdrop,
+                                   stateful = stateful)
+          z <- if (bidirectional) keras::bidirectional(z, rec) else rec(z)
+        }
+        out_t <- keras::layer_dense(units = 1L)(z)
+        model <- keras::keras_model(inp, out_t)
+        opt_obj <- switch(opt,
+          "sgd"   = keras::optimizer_sgd(learning_rate = lr),
+          "rmsprop" = keras::optimizer_rmsprop(learning_rate = lr),
+          keras::optimizer_adam(learning_rate = lr))
+        model$compile(optimizer = opt_obj, loss = loss_for_task())
+        cb <- list()
+        if (patience > 0)
+          cb <- c(cb, list(keras::callback_early_stopping(
+            monitor = "loss", patience = patience,
+            restore_best_weights = TRUE)))
+        if (sched == "reduce_on_plateau")
+          cb <- c(cb, list(keras::callback_reduce_lr_on_plateau(
+            monitor = "loss", patience = max(1L, patience %/% 2L))))
+        hist <- model$fit(sup$X, sup$y, epochs = epochs, batch_size = batch,
+                          verbose = 0L, callbacks = cb)
+
+        # Cache training tail for forecasting
+        last_window <- utils::tail(y, timesteps)
+
+        list(model = model,
+             predict = function(newdata = NULL, h = 12) {
+               # Recursive multi-step forecast from last training window
+               yhat <- numeric(0)
+               window <- last_window
+               for (i in seq_len(h)) {
+                 Xn <- array(window, dim = c(1L, timesteps, 1L))
+                 p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
+                 yhat <- c(yhat, p)
+                 window <- c(window[-1], p)
+               }
+               data.frame(predicted = yhat, lower = NA_real_, upper = NA_real_)
+             },
+             feat_imp = NULL,
+             diagnostics = list(
+               backend = "keras",
+               timesteps = timesteps,
+               epochs_run = length(hist$history$loss %||% list()),
+               final_loss = utils::tail(hist$history$loss %||% list(NA), 1)[[1]],
+               history = hist$history))
+      }
+    }, error = function(e) {
+      message("LSTM keras backend failed: ", conditionMessage(e),
+              " — falling back to TSLSTMplus if available.")
+      NULL
+    })
+    if (!is.null(out)) return(out)
+  }
+
+  # ---- Path 2: TSLSTMplus fallback ------------------------------------
+  if (use_tslstm && task == "time_series") {
+    y <- as.numeric(df[[target]])
+    m <- TSLSTMplus::ts.lstm(
+      ts = y,
+      tsLag = timesteps,
+      LSTMUnits = units,
+      Epochs = epochs,
+      BatchSize = batch
+    )
+    return(list(
+      model = m,
+      predict = function(newdata = NULL, h = 12) {
+        fc <- tryCatch(
+          TSLSTMplus::predict(m, h = h),
+          error = function(e) rep(utils::tail(y, 1), h))
+        data.frame(predicted = as.numeric(fc), lower = NA_real_, upper = NA_real_)
+      },
+      feat_imp = NULL,
+      diagnostics = list(backend = "TSLSTMplus", timesteps = timesteps)
+    ))
+  }
+
+  stop("LSTM unavailable: install R 'keras' (with Python TensorFlow) or 'TSLSTMplus'")
+}
+
+# ---- KAN (Kolmogorov-Arnold Network) ---------------------------------
+fit_kan <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  if (!py_is_available())
+    stop("KAN requires Python; run reticulate::py_install(c('pykan','torch'))")
+  task <- if (classification) "classification" else "regression"
+  feat_cols <- setdiff(names(df), target)
+  X <- df[, feat_cols, drop = FALSE]
+  X <- as.data.frame(lapply(X, function(c) if (is.factor(c)||is.character(c))
+                                              as.integer(as.factor(c))
+                                            else as.numeric(c)))
+  y <- df[[target]]
+  n_features <- max(1L, ncol(X))
+
+  width <- .parse_layer_widths(params$width %||%
+    sprintf("[%d, 5, 1]", n_features), n_features = n_features)
+  if (is.null(width) || length(width) < 2) width <- c(n_features, 5L, 1L)
+
+  py_params <- list(
+    width            = as.integer(width),
+    grid             = as.integer(params$grid %||% 5),
+    k                = as.integer(params$k %||% 3),
+    seed             = as.integer(params$seed %||% 0),
+    lamb             = as.numeric(params$lamb %||% 0),
+    lamb_l1          = as.numeric(params$lamb_l1 %||% 1),
+    lamb_entropy     = as.numeric(params$lamb_entropy %||% 2),
+    lamb_coef        = as.numeric(params$lamb_coef %||% 0),
+    lamb_coefdiff    = as.numeric(params$lamb_coefdiff %||% 0),
+    steps            = as.integer(params$steps %||% 100),
+    optimizer        = as.character(params$optimizer %||% "LBFGS"),
+    learning_rate    = as.numeric(params$learning_rate %||% 1e-2),
+    prune_threshold  = as.numeric(params$prune_threshold %||% 1e-2),
+    plot_functions   = isTRUE(params$plot_functions %||% FALSE)
+  )
+
+  fitted_X <- X
+  list(
+    model = list(engine = "kan_py", params = py_params),
+    predict = function(newdata, h = NULL) {
+      keep <- intersect(names(fitted_X), names(newdata))
+      nx <- newdata[, keep, drop = FALSE]
+      nx <- as.data.frame(lapply(nx, function(c) if (is.factor(c)||is.character(c))
+                                                    as.integer(as.factor(c))
+                                                  else as.numeric(c)))
+      for (m in setdiff(names(fitted_X), keep)) nx[[m]] <- 0
+      nx <- nx[, names(fitted_X), drop = FALSE]
+      out <- py_train_predict("kan",
+        x_train = X, y_train = y, x_test = nx,
+        params = py_params, task = task)
+      out$predictions
+    },
+    feat_imp = NULL,
+    diagnostics = list(backend = "pykan", width = width)
   )
 }
 
@@ -983,6 +1288,193 @@ MODELS <- list(
                 choices = c("auto", "TRUE", "FALSE"),
                 description = "Damp the trend component."))),
 
+  # ---- Deep Learning -------------------------------------------------
+  lstm = list(id = "lstm", label = "LSTM (Long Short-Term Memory)", engine = "R",
+            task_types = c("time_series","binary_classification","multiclass_classification"),
+            fn = fit_lstm,
+            beta = FALSE,
+            available = function() {
+              if (.has("keras")) return(avail_ok())
+              if (.has("TSLSTMplus")) return(list(ok = TRUE,
+                msg = "Using TSLSTMplus fallback (univariate). Install 'keras' for full features."))
+              list(ok = FALSE,
+                   msg = paste0(
+                     "LSTM requires R 'keras' (Keras + TensorFlow via reticulate) ",
+                     "or 'TSLSTMplus' for univariate fallback. Run ",
+                     "install.packages('keras'); keras::install_keras() to enable."))
+            },
+            reference_url = "https://keras.posit.co/",
+            dependencies = c("R: keras (with Python tensorflow)", "R: TSLSTMplus (optional fallback)"),
+            description = paste(
+              "LSTM (Long Short-Term Memory). Recurrent neural network with gating that captures long-range",
+              "dependencies in sequences. Strong choice when you have genuine sequential structure",
+              "(long context, nonlinear dynamics, regime shifts) and enough data — typically hundreds of series",
+              "or long histories. For short, simple business series, ARIMA/ETS/Prophet or GBMs on lagged features",
+              "are often simpler and competitive."),
+            best_for = c(
+              "high-frequency data (minute / hourly / daily)",
+              "multiple interacting signals or many parallel series",
+              "long histories with nonlinear dynamics or regime shifts",
+              "sequence classification (text-like or sensor sequences)"
+            ),
+            avoid_when = c(
+              "you have a short, single series with a clear trend / seasonality (use ETS / ARIMA / Prophet)",
+              "your data is tabular non-sequential (use XGBoost / LightGBM / GAM)",
+              "you cannot install a Python TensorFlow runtime"
+            ),
+            long_doc = paste(sep = "\n\n",
+              "**Architecture.** An LSTM is a recurrent neural network whose memory cell is regulated by three",
+              "learned gates — input, forget, and output. At every step the network can decide *what to remember,*",
+              "*what to discard,* and *what to expose downstream.* This gating sidesteps the vanishing-gradient",
+              "problem that crippled vanilla RNNs on long sequences and lets the model carry information across",
+              "hundreds of timesteps without the signal collapsing.",
+              "**Why it matters.** Hochreiter & Schmidhuber's 1997 paper specifically targeted long-range",
+              "credit assignment: how can a sequence model relate an event at step *t* to a consequence at step",
+              "*t + 200*? Their answer — the constant error carousel inside the cell — turns the recurrence into a",
+              "near-additive update on the cell state, so gradients flow without exponential decay.",
+              "**Framing.** For forecasting we typically build a *sequence-to-one* supervised problem: feed the last",
+              "`timesteps` observations as input and predict the next value. For classification we feed each",
+              "sequence and emit a single class. *Stateful* mode preserves cell state across batches (useful for",
+              "very long series); *bidirectional* lets a non-causal sequence be read both ways and helps when the",
+              "full sequence is available at inference time (e.g. text classification, not online forecasting).",
+              "**When classical baselines win.** A well-specified ETS or auto.arima can *beat* an LSTM on a single",
+              "monthly series with strong seasonality and only 60 observations — there simply isn't enough data to",
+              "train millions of weights. Reach for LSTM when (a) you have a long, high-frequency, or multi-series",
+              "panel and (b) the dynamics are visibly nonlinear. References: Hochreiter & Schmidhuber 1997;",
+              "Goodfellow et al., *Deep Learning* Ch. 10; keras.posit.co documentation."),
+            groups = list(
+              "Architecture"          = c("units","layers","bidirectional","stateful","return_sequences"),
+              "Sequence shape"        = c("timesteps"),
+              "Regularization"        = c("dropout","recurrent_dropout"),
+              "Optimization"          = c("optimizer","learning_rate","loss","lr_scheduler"),
+              "Training schedule"     = c("batch_size","epochs","early_stopping_patience"),
+              "Reproducibility"       = c("seed")
+            ),
+            params = list(
+              P("units", "Hidden units", "integer", 64, 8, 512, 8,
+                description = "Number of LSTM cells per layer. More = more capacity, slower training."),
+              P("layers", "Stacked layers", "integer", 1, 1, 4, 1,
+                description = "How many LSTM layers to stack. Deeper networks need more data."),
+              P("bidirectional", "Bidirectional", "logical", FALSE,
+                description = "Read each sequence forward AND backward. Use when full sequence is available offline."),
+              P("dropout", "Dropout", "numeric", 0, 0, 0.7, 0.05,
+                description = "Dropout on the input/output of each LSTM layer."),
+              P("recurrent_dropout", "Recurrent dropout", "numeric", 0, 0, 0.7, 0.05,
+                description = "Dropout applied to the recurrent transition (state-to-state)."),
+              P("timesteps", "Timesteps (window length)", "integer", 12, 2, 1000, 1,
+                description = "How many lagged values per training example. Set to one seasonal cycle (e.g. 12 for monthly)."),
+              P("batch_size", "Batch size", "integer", 32, 8, 512, 8,
+                description = "Mini-batch size for SGD."),
+              P("epochs", "Epochs", "integer", 100, 10, 500, 10,
+                description = "Maximum passes over the training data; early stopping can cut this short."),
+              P("learning_rate", "Learning rate", "numeric", 1e-3, 1e-5, 1e-1, 1e-4,
+                description = "Initial optimizer learning rate."),
+              P("optimizer", "Optimizer", "select", "adam",
+                choices = c("adam","sgd","rmsprop","adamw"),
+                description = "SGD variant. 'adam' is the safe default."),
+              P("loss", "Loss", "select", "auto",
+                choices = c("auto","mse","mae","huber","binary_crossentropy","sparse_categorical_crossentropy"),
+                description = "'auto' picks mse for forecasting, sparse_categorical_crossentropy for classification."),
+              P("early_stopping_patience", "Early stopping patience", "integer", 10, 0, 50, 1,
+                description = "Stop training if loss does not improve for N epochs. 0 = off."),
+              P("lr_scheduler", "LR scheduler", "select", "none",
+                choices = c("none","step","cosine","reduce_on_plateau"),
+                description = "Schedule for the learning rate over epochs."),
+              P("stateful", "Stateful", "logical", FALSE,
+                description = "Preserve LSTM cell state across batches. Useful for very long single series."),
+              P("return_sequences", "Return sequences", "logical", FALSE,
+                description = "Emit one output per timestep (for seq-to-seq tasks)."),
+              P("seed", "Random seed", "integer", 42, 0, .Machine$integer.max, 1,
+                description = "Seed for reproducible weight initialisation."))),
+
+  kan = list(id = "kan", label = "KAN (Kolmogorov-Arnold Network) — BETA", engine = "Python",
+            task_types = c("regression","binary_classification","multiclass_classification"),
+            fn = fit_kan,
+            beta = TRUE,
+            available = function() avail_python("kan",
+              hint = "reticulate::py_install(c('pykan','torch'))"),
+            reference_url = "https://github.com/KindXiaoming/pykan",
+            dependencies = c("Python: pykan", "Python: torch"),
+            description = paste(
+              "KAN (Kolmogorov-Arnold Network). New architecture inspired by the Kolmogorov-Arnold representation",
+              "theorem; learnable univariate functions live on edges instead of fixed activations on nodes.",
+              "Can match or beat MLPs on smooth low-to-medium-dimensional regression and PDE tasks with smaller",
+              "networks and improved interpretability — you can inspect the learned 1-D functions. Status:",
+              "research-grade. The practical gains over well-tuned MLPs and GBMs are still modest in many",
+              "benchmarks. Use for experimentation and interpretability studies, not bread-and-butter tabular pipelines."),
+            best_for = c(
+              "smooth, low- to medium-dimensional regression",
+              "cases where interpretability of learned 1-D functions is valuable",
+              "PDE-style problems and physical simulations"
+            ),
+            avoid_when = c(
+              "production tabular pipelines (gradient boosting wins consistently)",
+              "high-dimensional sparse data",
+              "very large datasets — pykan trains slowly compared to GBMs",
+              "true time-series forecasting — use LSTM / Prophet / ARIMA instead"
+            ),
+            long_doc = paste(sep = "\n\n",
+              "**The theorem.** Kolmogorov-Arnold (1957) states that any multivariate continuous function on a",
+              "bounded domain can be represented as a finite composition of *univariate* continuous functions and",
+              "addition. KANs are a neural-network instantiation of that decomposition: instead of fixed activations",
+              "(ReLU, tanh) sitting on nodes with learned linear weights on edges, a KAN puts *learned* univariate",
+              "splines (B-splines parameterised by `grid` knots and order `k`) on the edges and a simple sum on the",
+              "nodes.",
+              "**Why this changes the inductive bias.** A standard MLP composes many low-dimensional linear maps",
+              "with a single fixed nonlinearity. A KAN composes many learned 1-D nonlinearities with addition. For",
+              "smooth functions on low- to medium-dimensional inputs (think PDE solutions, physics regressions),",
+              "this matches the structure of the target much better and tends to need fewer parameters. The trade-off",
+              "is that each edge now has its own spline, so total parameter count and training time per step grow",
+              "with `grid` and `k`.",
+              "**Interpretability.** Because every edge is a 1-D function you can literally *plot it.* pykan's",
+              "`model.plot()` renders each learned univariate function, and there is symbolic regression machinery",
+              "(`auto_symbolic`) that tries to fit closed-form expressions like `sin`, `exp`, `log` to those splines.",
+              "This is the headline selling point — for the (narrow but real) class of problems where it works, you",
+              "get a model whose internals can be read like a textbook.",
+              "**Caveats and the open debate.** KANs are research-grade. Independent reproductions have shown that",
+              "well-tuned MLPs and gradient boosters often match or beat KANs on standard tabular benchmarks once",
+              "you control for parameter count and training budget. Training is slower because LBFGS / Adam over",
+              "splines is heavier per step. Sparse-data regimes can be unstable. Use KAN as an *experimental* tool",
+              "for interpretability-first projects, not as a default. References: Liu et al. 2024,",
+              "*KAN: Kolmogorov-Arnold Networks* (arXiv:2404.19756); pykan README at github.com/KindXiaoming/pykan."),
+            groups = list(
+              "Architecture"     = c("width","grid","k"),
+              "Optimization"     = c("optimizer","learning_rate","steps"),
+              "Regularization"   = c("lamb","lamb_l1","lamb_entropy","lamb_coef","lamb_coefdiff","prune_threshold"),
+              "Reproducibility"  = c("seed"),
+              "Diagnostics"      = c("plot_functions")
+            ),
+            params = list(
+              P("width", "Layer widths", "text", "[n_features, 5, 1]",
+                description = "Comma list of layer widths. 'n_features' is substituted at runtime. e.g. '[n_features, 5, 1]'."),
+              P("grid", "Grid (spline knots)", "integer", 5, 3, 50, 1,
+                description = "Number of grid knots per univariate spline. Higher = wigglier, more parameters."),
+              P("k", "Spline order (k)", "integer", 3, 1, 10, 1,
+                description = "B-spline order. 3 = cubic (default and usually fine)."),
+              P("seed", "Random seed", "integer", 0, 0, .Machine$integer.max, 1,
+                description = "Seed for spline initialisation."),
+              P("lamb", "Lambda (overall reg)", "numeric", 0, 0, 1e-1, 1e-4,
+                description = "Overall regularisation strength."),
+              P("lamb_l1", "Lambda L1", "numeric", 1, 0, 1, 1e-2,
+                description = "L1 penalty on edge functions (sparsity)."),
+              P("lamb_entropy", "Lambda entropy", "numeric", 2, 0, 10, 1e-2,
+                description = "Entropy regularisation; encourages clean, low-entropy edge functions."),
+              P("lamb_coef", "Lambda coef", "numeric", 0, 0, 1, 1e-3,
+                description = "Penalty on spline coefficients."),
+              P("lamb_coefdiff", "Lambda coef-diff", "numeric", 0, 0, 1, 1e-3,
+                description = "Penalty on differences of consecutive coefficients (smoothness)."),
+              P("steps", "Training steps", "integer", 100, 10, 2000, 10,
+                description = "Number of optimisation steps."),
+              P("optimizer", "Optimizer", "select", "LBFGS",
+                choices = c("LBFGS","Adam"),
+                description = "LBFGS converges in fewer steps for small problems; Adam scales to larger ones."),
+              P("learning_rate", "Learning rate", "numeric", 1e-2, 1e-4, 1e-1, 1e-4,
+                description = "Step size for Adam (ignored by LBFGS)."),
+              P("prune_threshold", "Prune threshold", "numeric", 1e-2, 0, 1, 1e-3,
+                description = "Magnitude below which an edge function is pruned after training."),
+              P("plot_functions", "Plot learned 1-D functions", "logical", FALSE,
+                description = "After training, render pykan's diagnostic plot of each edge function (best effort)."))),
+
   prophet = list(id = "prophet", label = "Prophet (Meta)", engine = "R",
             task_types = c("time_series"), fn = fit_prophet,
             available = function() avail_pkg("prophet",
@@ -1039,3 +1531,321 @@ model_availability <- function(model_id) {
   tryCatch(m$available(),
            error = function(e) list(ok = FALSE, msg = conditionMessage(e)))
 }
+
+# ---- Editorial metadata for existing models -------------------------------
+# Authored once here so the Training Studio's "About this model" drawer can
+# render best_for / avoid_when / long_doc / reference_url / dependencies for
+# *every* model — not just the new LSTM/KAN entries — without ballooning the
+# main MODELS list. Models defined inline above (LSTM, KAN) take precedence.
+EXTRA_DOCS <- list(
+  lm = list(
+    best_for = c("linear, monotonic relationships",
+                 "small/medium datasets where interpretability matters",
+                 "sanity checking before reaching for fancier models"),
+    avoid_when = c("strongly nonlinear targets",
+                   "many correlated predictors (use Elastic Net)",
+                   "heavy-tailed residuals (consider robust regression)"),
+    reference_url = "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/lm.html",
+    dependencies = c("R: stats (base)"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Ordinary least squares finds the coefficient vector that minimises the sum of squared residuals.",
+      "Each coefficient is the marginal effect of its predictor with everything else held fixed.",
+      "**Assumptions.** Linearity in parameters, approximately Gaussian residuals, homoscedasticity, and no",
+      "near-perfect multicollinearity. Inference (p-values, CIs) leans on these assumptions; point predictions are",
+      "more forgiving.",
+      "**When it wins.** Whenever the truth is close to linear and you need something stakeholders can read off",
+      "the coefficient table. It's also the right floor for benchmarking — if a tuned XGBoost barely beats lm,",
+      "the simpler model usually wins.",
+      "**Pitfalls.** Outliers can dominate the fit; consider robust alternatives (`MASS::rlm`) or winsorisation.",
+      "Reference: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/lm.html.")),
+  glmnet_reg = list(
+    best_for = c("p > n or many correlated features",
+                 "automatic feature selection (Lasso)",
+                 "high-dimensional tabular regression"),
+    avoid_when = c("strongly nonlinear effects (use GAM / GBM)",
+                   "tiny datasets where vanilla lm suffices"),
+    reference_url = "https://glmnet.stanford.edu/",
+    dependencies = c("R: glmnet"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Penalised linear regression: minimise (RSS + lambda * [(1 - alpha) * 0.5 * ||beta||^2 + alpha * ||beta||_1]).",
+      "alpha=1 is Lasso (sparse); alpha=0 is Ridge (handles correlated features). Lambda is selected by k-fold CV.",
+      "**Why it works.** Regularisation trades a small amount of bias for a large reduction in variance — exactly",
+      "what you want when n is small relative to p. Lasso additionally drives some coefficients to zero, giving you",
+      "feature selection for free.",
+      "**Tuning.** alpha is the L1 / L2 mixing knob; nlambda controls the granularity of the CV path. Standardise",
+      "predictors so the penalty treats them on equal footing.",
+      "**References.** Friedman, Hastie & Tibshirani, *glmnet* paper (J. Stat. Softw. 2010); https://glmnet.stanford.edu/.")),
+  gam = list(
+    best_for = c("nonlinear-but-additive effects",
+                 "interpretable plots of each smooth",
+                 "moderate-sized datasets"),
+    avoid_when = c("you need strong feature interactions (use GBMs)",
+                   "ultra-high-dimensional sparse data"),
+    reference_url = "https://cran.r-project.org/package=mgcv",
+    dependencies = c("R: mgcv"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** A Generalised Additive Model fits each numeric predictor as a penalised smooth `s(x)` and adds",
+      "them up. The smoothness of each term is chosen by the data via REML / GCV.",
+      "**Why it works.** Most real-world relationships are nonlinear but mostly *additive* — a GAM captures the",
+      "nonlinearity without giving up the per-feature interpretability of a linear model.",
+      "**Tuning.** k caps the basis dimension; -1 lets mgcv choose. 'Penalised selection' lets useless smooths be",
+      "shrunk all the way to zero (a soft variable selection).",
+      "**References.** Wood, *Generalized Additive Models: An Introduction with R* (2nd ed., CRC, 2017); ?mgcv::gam.")),
+  ranger_reg = list(
+    best_for = c("strong nonparametric baseline with little tuning",
+                 "mixed feature types out of the box",
+                 "feature importance via impurity"),
+    avoid_when = c("extrapolation outside the training range is required",
+                   "you need calibrated probability outputs (use a logistic / Brier model)"),
+    reference_url = "https://cran.r-project.org/package=ranger",
+    dependencies = c("R: ranger"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Random Forests build many decorrelated decision trees on bootstrap samples; predictions average",
+      "across trees. ranger is a fast C++ implementation, well suited to mid-to-large datasets.",
+      "**Why it works.** Bagging reduces variance, the random feature subset at each split decorrelates the trees,",
+      "and the average is a much smoother estimator than any single tree.",
+      "**Tuning.** num_trees > 500 for stable importance estimates; mtry, min_node_size, max_depth, sample_fraction",
+      "are the main knobs. extratrees splitrule injects extra randomness for more regularisation.",
+      "**References.** Breiman 2001 (*Random Forests*); Wright & Ziegler 2017 (*ranger*).")),
+  xgb_reg = list(
+    best_for = c("tabular regression on real-world messy data",
+                 "datasets where interactions matter",
+                 "fast inference once trained"),
+    avoid_when = c("very small datasets where lm/GAM win",
+                   "strict interpretability mandates without SHAP"),
+    reference_url = "https://xgboost.readthedocs.io/",
+    dependencies = c("R: xgboost"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Gradient boosting builds trees sequentially, each fitted to the negative gradient of the loss",
+      "with respect to the running prediction. XGBoost adds a second-order (Hessian) term, regularisation on leaf",
+      "weights, and a histogram-based split finder.",
+      "**Why it works.** Boosting turns weak learners (shallow trees) into a strong learner; regularisation and",
+      "subsampling fight overfitting; the tree base learner handles nonlinearity and interactions natively.",
+      "**Tuning order.** (1) eta + nrounds with early stopping; (2) max_depth and min_child_weight; (3) subsample",
+      "and colsample_bytree; (4) gamma / lambda / alpha for additional regularisation.",
+      "**References.** Chen & Guestrin 2016 (XGBoost paper); https://xgboost.readthedocs.io/.")),
+  lightgbm_reg = list(
+    best_for = c("very large datasets",
+                 "speed-sensitive training loops"),
+    avoid_when = c("tiny datasets (overfits a leaf-wise tree easily)"),
+    reference_url = "https://lightgbm.readthedocs.io/",
+    dependencies = c("Python: lightgbm"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** LightGBM grows trees leaf-wise (best-first) instead of level-wise, picking the leaf with the",
+      "biggest loss reduction at each step. Combined with histogram-based binning this delivers substantial speed-ups",
+      "on large datasets versus depth-first GBMs.",
+      "**Why it works.** Leaf-wise growth concentrates capacity where the loss is highest, so for a fixed number",
+      "of leaves you usually get a better fit than depth-wise growth. Histograms reduce split-search cost from O(n)",
+      "to O(bins).",
+      "**Tuning.** num_leaves is the master knob (keep < 2^max_depth to avoid overfit); pair low learning_rate",
+      "with many iterations; min_data_in_leaf is the strongest regulariser.",
+      "**References.** Ke et al. 2017 (NeurIPS) — *LightGBM: A Highly Efficient Gradient Boosting Decision Tree*.")),
+  catboost_reg = list(
+    best_for = c("datasets with many categorical features",
+                 "fewer hyperparameters to tune"),
+    avoid_when = c("you need very fast training on huge data (LightGBM is faster)"),
+    reference_url = "https://catboost.ai/",
+    dependencies = c("Python: catboost"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** CatBoost is a gradient boosting library from Yandex that handles categorical features natively",
+      "via *ordered target statistics* (each row's encoding uses only earlier rows, breaking the prediction-shift",
+      "leak that one-hot encoding can produce in the presence of high-cardinality categories).",
+      "**Why it works.** Symmetric (oblivious) trees and ordered boosting reduce overfitting; the categorical",
+      "handling removes the need for manual one-hot encoding.",
+      "**Tuning.** iterations + learning_rate are the primary axis; depth (typically 4-8) and l2_leaf_reg are next;",
+      "bagging_temperature and random_strength inject randomness for regularisation.",
+      "**References.** Prokhorenkova et al. 2018 (NeurIPS) — *CatBoost: unbiased boosting with categorical features*.")),
+  mlp_reg = list(
+    best_for = c("nonlinear regression with abundant data",
+                 "embedding a model inside a larger neural pipeline"),
+    avoid_when = c("small datasets (a GAM or GBM will be more reliable)"),
+    reference_url = "https://keras.posit.co/",
+    dependencies = c("Python: tensorflow (optional fallback: scikit-learn)"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** A multi-layer perceptron is a stack of fully connected layers with elementwise nonlinearities.",
+      "Universal approximation guarantees that, with enough hidden units, an MLP can represent any continuous",
+      "function on a bounded domain.",
+      "**Why it works (when it does).** Backprop + SGD finds local minima of the loss surface that generalise",
+      "surprisingly well in over-parameterised regimes. Dropout and weight decay control overfitting.",
+      "**Tuning.** Width and depth (hidden_units), dropout, learning_rate, and batch_size are the main levers.",
+      "Use early stopping if you can carve out a validation set.",
+      "**References.** Goodfellow et al., *Deep Learning* (MIT Press, 2016); https://keras.posit.co/.")),
+  logit = list(
+    best_for = c("interpretable two-class baselines",
+                 "calibrated probability outputs"),
+    avoid_when = c("nonlinear class boundaries dominate (use trees / GBMs)"),
+    reference_url = "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/glm.html",
+    dependencies = c("R: stats (base)"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Logistic regression models the log-odds of the positive class as a linear combination of the",
+      "features. Coefficients translate to odds ratios — a one-unit increase in x_j multiplies the odds by exp(beta_j).",
+      "**Why it works.** It is the maximum-entropy classifier subject to feature-mean constraints; it is convex,",
+      "fast, and produces well-calibrated probabilities by default.",
+      "**Tuning.** Link function (logit / probit / cloglog) rarely matters for prediction; pick logit unless you",
+      "have a domain reason. Use penalised variants (glmnet) when p is large or features are correlated.",
+      "**References.** Hosmer, Lemeshow & Sturdivant, *Applied Logistic Regression* (3rd ed., Wiley, 2013).")),
+  glmnet_cls = list(
+    best_for = c("p > n binary classification",
+                 "high-dimensional text/genomic data"),
+    avoid_when = c("nonlinear class boundaries dominate"),
+    reference_url = "https://glmnet.stanford.edu/",
+    dependencies = c("R: glmnet"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Penalised logistic regression with the same Lasso / Ridge / Elastic Net machinery as glmnet for",
+      "regression, but with the binomial deviance as the loss.",
+      "**Why it works.** Combines logistic's calibrated probabilities with regularisation's bias-variance trade-off.",
+      "Lasso variant gives feature selection inside the fit.",
+      "**Tuning.** alpha + nlambda + nfolds; standardise features.",
+      "**References.** Friedman, Hastie & Tibshirani 2010; https://glmnet.stanford.edu/.")),
+  ranger_cls = list(
+    best_for = c("multiclass tabular classification",
+                 "robust default with little tuning"),
+    avoid_when = c("calibrated probabilities are critical without recalibration"),
+    reference_url = "https://cran.r-project.org/package=ranger",
+    dependencies = c("R: ranger"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Random Forest classifier — same machinery as the regressor with class-vote / probability outputs.",
+      "**Why it works.** See ranger_reg; for classification it is the standard off-the-shelf strong baseline.",
+      "**Tuning.** num_trees, mtry (often sqrt(p) is good), min_node_size, sample_fraction. extratrees splitrule",
+      "for additional regularisation.",
+      "**References.** Breiman 2001; Wright & Ziegler 2017.")),
+  xgb_cls = list(
+    best_for = c("tabular binary / multiclass classification",
+                 "winning Kaggle-style benchmarks"),
+    avoid_when = c("very small datasets where lm/GAM win"),
+    reference_url = "https://xgboost.readthedocs.io/",
+    dependencies = c("R: xgboost"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** XGBoost classifier — same gradient-boosted trees, with logistic / softmax loss.",
+      "**Why it works.** See xgb_reg.",
+      "**Tuning.** Same order as the regressor; for very imbalanced targets, tune scale_pos_weight or use",
+      "stratified CV.",
+      "**References.** Chen & Guestrin 2016; https://xgboost.readthedocs.io/.")),
+  lightgbm_cls = list(
+    best_for = c("very large multiclass datasets",
+                 "speed-sensitive training loops"),
+    avoid_when = c("tiny datasets"),
+    reference_url = "https://lightgbm.readthedocs.io/",
+    dependencies = c("Python: lightgbm"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** LightGBM classifier — see lightgbm_reg for the underlying boosting machinery.",
+      "**Why it works / Tuning / References.** Same as lightgbm_reg.")),
+  mlp_cls = list(
+    best_for = c("deep tabular classification with abundant data",
+                 "embedding inside a larger neural pipeline"),
+    avoid_when = c("small datasets"),
+    reference_url = "https://keras.posit.co/",
+    dependencies = c("Python: tensorflow (optional fallback: scikit-learn)"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Keras MLP classifier with softmax output.",
+      "**Why it works / Tuning / References.** Same as mlp_reg; for classification use sparse_categorical_crossentropy.")),
+  poisson = list(
+    best_for = c("count outcomes (events per period)",
+                 "interpretable rate ratios"),
+    avoid_when = c("over-dispersed counts (use Negative Binomial)"),
+    reference_url = "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/glm.html",
+    dependencies = c("R: stats (base)"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Poisson GLM with a log link models log(E[Y|X]) as a linear function of features. exp(coef) is",
+      "the multiplicative effect on the expected count.",
+      "**Assumption.** Mean equals variance. Real count data is often over-dispersed — check with the dispersion",
+      "test before trusting standard errors.",
+      "**Reference.** McCullagh & Nelder, *Generalized Linear Models* (Chapman & Hall, 1989).")),
+  negbin = list(
+    best_for = c("over-dispersed count data",
+                 "panels with rare-but-clustered events"),
+    avoid_when = c("equidispersed counts (Poisson is more efficient)"),
+    reference_url = "https://cran.r-project.org/package=MASS",
+    dependencies = c("R: MASS"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Negative Binomial GLM adds a dispersion parameter theta to Poisson, allowing variance > mean.",
+      "**Why it works.** Real-world count data — insurance claims, hospital admissions, social-media events — is",
+      "almost always over-dispersed. Poisson SEs collapse on such data; NB fixes that.",
+      "**Reference.** Hilbe, *Negative Binomial Regression* (CUP, 2nd ed., 2011).")),
+  betareg = list(
+    best_for = c("continuous proportions / rates in (0, 1)",
+                 "fractions, percentages, response shares"),
+    avoid_when = c("targets touch the {0, 1} boundary often (use zero/one-inflated beta)"),
+    reference_url = "https://cran.r-project.org/package=betareg",
+    dependencies = c("R: betareg"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Beta regression assumes Y | X ~ Beta(mu, phi) reparameterised so mu is the mean and phi the",
+      "precision. Mean and precision can each be modelled with their own link.",
+      "**Why it works.** Linear regression on a (0, 1) target produces nonsensical predictions outside the unit",
+      "interval; logit-Gaussian heroics distort variance. Beta is the natural exponential family on (0, 1).",
+      "**Reference.** Cribari-Neto & Zeileis 2010, *Beta Regression in R*, JSS.")),
+  arima = list(
+    best_for = c("univariate time series with trend / seasonality",
+                 "moderate horizons with calibrated PIs"),
+    avoid_when = c("multivariate dynamics dominate (use VAR / state-space / LSTM)",
+                   "very short series (< 30 obs)"),
+    reference_url = "https://otexts.com/fpp3/",
+    dependencies = c("R: forecast"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** ARIMA(p, d, q)(P, D, Q)[m] combines autoregression, differencing, and moving-average terms with",
+      "their seasonal counterparts. forecast::auto.arima searches over orders by AIC/BIC and chooses the best model.",
+      "**Why it works.** ARIMA is a flexible parametric family with calibrated prediction intervals when the",
+      "process is approximately stationary after differencing.",
+      "**Tuning.** Trust auto.arima for first cuts; raise max.p/q for richer dynamics; force stepwise=FALSE for an",
+      "exhaustive grid when speed permits.",
+      "**Reference.** Hyndman & Athanasopoulos, *Forecasting: Principles and Practice* (3rd ed., OTexts).")),
+  ets = list(
+    best_for = c("level / trend / seasonal smoothing",
+                 "stable seasonal series"),
+    avoid_when = c("structural breaks dominate (consider TBATS or Prophet)"),
+    reference_url = "https://otexts.com/fpp3/",
+    dependencies = c("R: forecast"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** ETS is a state-space exponential smoothing family with three components: Error (A/M), Trend",
+      "(N/A/M, optionally damped), and Seasonal (N/A/M). 'ZZZ' picks the best combination by AIC.",
+      "**Why it works.** Recursive smoothing weights recent observations more heavily — a strong inductive bias",
+      "for series whose level / trend / seasonality evolves slowly.",
+      "**Reference.** Hyndman, Koehler, Ord & Snyder, *Forecasting with Exponential Smoothing* (Springer, 2008).")),
+  tbats = list(
+    best_for = c("multiple seasonal periods (e.g. weekly + yearly)",
+                 "long, high-frequency series"),
+    avoid_when = c("short series",
+                   "you need fast training loops (TBATS is slow)"),
+    reference_url = "https://otexts.com/fpp3/",
+    dependencies = c("R: forecast"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** TBATS = Trigonometric seasonality + Box-Cox + ARMA errors + Trend + Seasonal. Handles multiple",
+      "seasonal periods (e.g. 7 and 365.25 for daily data) using Fourier terms.",
+      "**Why it works.** Real-world series often have nested seasonalities that single-period ETS / ARIMA cannot",
+      "capture; trigonometric seasonality scales gracefully.",
+      "**Reference.** De Livera, Hyndman & Snyder 2011 (*JASA*).")),
+  prophet = list(
+    best_for = c("business time series with holidays / changepoints",
+                 "non-experts who need readable trend / seasonality components"),
+    avoid_when = c("very short series",
+                   "high-frequency dynamics where LSTM / state-space win"),
+    reference_url = "https://facebook.github.io/prophet/",
+    dependencies = c("R: prophet"),
+    long_doc = paste(sep = "\n\n",
+      "**Model.** Prophet is a Bayesian additive model with three components: piecewise-linear (or logistic) trend",
+      "with automatic changepoint detection, Fourier-based seasonality, and holiday effects.",
+      "**Why it works.** Designed for business analysts: defaults are sane, missing data is tolerated, and the",
+      "components are interpretable. Trades a small amount of accuracy for robustness and explainability.",
+      "**Reference.** Taylor & Letham 2018, *Forecasting at Scale*.")
+  )
+)
+
+# Merge a model entry with its EXTRA_DOCS row (entry-level fields win).
+model_meta <- function(model_id) {
+  m <- MODELS[[model_id]]
+  if (is.null(m)) return(NULL)
+  extra <- EXTRA_DOCS[[model_id]] %||% list()
+  for (k in c("best_for","avoid_when","long_doc","reference_url","dependencies","groups")) {
+    if (is.null(m[[k]]) && !is.null(extra[[k]])) m[[k]] <- extra[[k]]
+  }
+  m
+}
+
+# Convenience accessors used by the Training Studio UI.
+model_long_doc      <- function(model_id) model_meta(model_id)$long_doc      %||% ""
+model_best_for      <- function(model_id) model_meta(model_id)$best_for      %||% character(0)
+model_avoid_when    <- function(model_id) model_meta(model_id)$avoid_when    %||% character(0)
+model_reference_url <- function(model_id) model_meta(model_id)$reference_url %||% ""
+model_dependencies  <- function(model_id) model_meta(model_id)$dependencies  %||% character(0)
+model_groups        <- function(model_id) model_meta(model_id)$groups        %||% list()
+model_is_beta       <- function(model_id) isTRUE(model_meta(model_id)$beta)

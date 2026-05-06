@@ -57,7 +57,14 @@ local({
   # and may legitimately fail on some systems. The app degrades gracefully
   # when they are missing — the model registry shows an inline warning
   # and skips the affected models.
-  optional <- c("prophet", "lightgbm", "catboost")
+  # `keras` and `TSLSTMplus` enable the new LSTM model; `keras` additionally
+  # requires a Python TensorFlow runtime configured separately. They live in
+  # the optional set because Python TF setup is an explicit, OS-specific step
+  # and we want the rest of the app to install cleanly even when TF can't be
+  # built. The KAN model is Python-only — see README for `pykan` install.
+  # Parallel backend for the Training Studio is via `future` (also optional).
+  optional <- c("prophet", "lightgbm", "catboost",
+                "keras", "TSLSTMplus", "themis", "future")
 
   binary_os <- (.Platform$OS.type == "windows" ||
                 Sys.info()[["sysname"]] == "Darwin")
