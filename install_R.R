@@ -23,7 +23,7 @@ local({
   message(sprintf("[install_R] %s | R %s.%s",
                   os, R.version$major, R.version$minor))
 
-  # ---- Required packages ---------------------------------------------
+  # ---- Required packages (install must succeed) ----------------------
   needed <- c(
     # Core Shiny
     "shiny", "bslib", "shinyWidgets", "shinycssloaders", "htmltools",
@@ -52,32 +52,74 @@ local({
     "httr2"
   )
 
-  installed <- rownames(installed.packages())
-  to_install <- setdiff(needed, installed)
+  # ---- Optional packages (install attempt is best-effort) ------------
+  # These are heavy or have native dependencies (Stan/rstan, system libs)
+  # and may legitimately fail on some systems. The app degrades gracefully
+  # when they are missing — the model registry shows an inline warning
+  # and skips the affected models.
+  optional <- c("prophet", "lightgbm", "catboost")
 
+  binary_os <- (.Platform$OS.type == "windows" ||
+                Sys.info()[["sysname"]] == "Darwin")
+  pkg_type <- if (binary_os) "binary" else "source"
+
+  installed <- rownames(installed.packages())
+
+  # ---- Install required ---------------------------------------------
+  to_install <- setdiff(needed, installed)
   if (length(to_install) == 0) {
     message("[install_R] All required packages already installed.")
   } else {
     message("[install_R] Installing ", length(to_install),
-            " package(s): ", paste(to_install, collapse = ", "))
-    # Use binary builds where possible (Win/macOS) to avoid C++ toolchain
-    # requirements on first install.
-    install.packages(to_install,
-                     dependencies = TRUE,
-                     type = if (.Platform$OS.type == "windows" ||
-                                Sys.info()[["sysname"]] == "Darwin")
-                              "binary" else "source")
+            " required package(s): ", paste(to_install, collapse = ", "))
+    install.packages(to_install, dependencies = TRUE, type = pkg_type)
+  }
+
+  # ---- Install optional (best-effort, never aborts) ------------------
+  installed <- rownames(installed.packages())
+  optional_to_install <- setdiff(optional, installed)
+  if (length(optional_to_install) > 0) {
+    message("[install_R] Attempting optional package(s): ",
+            paste(optional_to_install, collapse = ", "))
+    for (pkg in optional_to_install) {
+      ok <- tryCatch({
+        install.packages(pkg, dependencies = TRUE, type = pkg_type)
+        TRUE
+      }, error = function(e) {
+        message("[install_R] Optional '", pkg, "' install error: ",
+                conditionMessage(e))
+        FALSE
+      }, warning = function(w) {
+        message("[install_R] Optional '", pkg, "' install warning: ",
+                conditionMessage(w))
+        TRUE
+      })
+      if (!ok) next
+    }
   }
 
   # ---- Verify --------------------------------------------------------
-  still_missing <- setdiff(needed, rownames(installed.packages()))
-  if (length(still_missing) > 0) {
-    warning("[install_R] Still missing: ",
-            paste(still_missing, collapse = ", "),
+  installed <- rownames(installed.packages())
+  still_missing_required <- setdiff(needed, installed)
+  still_missing_optional <- setdiff(optional, installed)
+
+  if (length(still_missing_optional) > 0) {
+    message("[install_R] NOTE: optional package(s) not installed: ",
+            paste(still_missing_optional, collapse = ", "),
+            ". The app will still run; affected models will show a ",
+            "missing-dependency notice in the Model Lab.")
+  }
+
+  if (length(still_missing_required) > 0) {
+    warning("[install_R] Still missing required: ",
+            paste(still_missing_required, collapse = ", "),
             "\n  Try installing manually: install.packages(c(",
-            paste(sprintf("'%s'", still_missing), collapse = ", "),
+            paste(sprintf("'%s'", still_missing_required), collapse = ", "),
             "))")
     quit(status = 1)
   }
-  message("[install_R] Done. ", length(needed), " package(s) ready.")
+  message("[install_R] Done. ", length(needed),
+          " required package(s) ready (", length(optional) -
+            length(still_missing_optional), "/", length(optional),
+          " optional).")
 })

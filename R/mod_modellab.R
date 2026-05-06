@@ -92,12 +92,21 @@ modellab_server <- function(id, state) {
       req(input$model_id)
       m <- MODELS[[input$model_id]]
       if (is.null(m)) return(NULL)
+      av <- model_availability(input$model_id)
       tagList(
         tags$div(style = "margin-top:-6px; margin-bottom:4px;",
                  engine_badge(m$engine),
                  if (m$engine == "Python")
                    tags$small(class="text-muted",
                      " · requires Python via reticulate")),
+        if (!isTRUE(av$ok))
+          tags$div(
+            class = "alert alert-warning",
+            style = "font-size:0.85em; padding:8px 10px; margin-top:6px; line-height:1.45;",
+            icon("triangle-exclamation"),
+            tags$b(" Optional dependency missing"), br(),
+            av$msg %||% "This model's runtime is not available."
+          ),
         if (!is.null(m$description) && nzchar(m$description))
           tags$div(
             class = "alert alert-secondary",
@@ -115,14 +124,25 @@ modellab_server <- function(id, state) {
         return(tags$em(class = "text-muted", "No tunable hyperparameters."))
       lapply(m$params, function(p) {
         nm <- ns(paste0("param_", p$name))
-        switch(p$type,
+        widget <- switch(p$type,
           "numeric" = numericInput(nm, p$label, value = p$default,
                                    min = p$min, max = p$max, step = p$step),
           "integer" = numericInput(nm, p$label, value = p$default,
                                    min = p$min, max = p$max, step = p$step %||% 1),
           "logical" = checkboxInput(nm, p$label, value = isTRUE(p$default)),
-          "select"  = selectInput(nm, p$label, choices = p$choices, selected = p$default),
-          "text"    = textInput(nm, p$label, value = p$default)
+          "select"  = selectInput(nm, p$label, choices = p$choices,
+                                  selected = as.character(p$default)),
+          "text"    = textInput(nm, p$label, value = p$default),
+          # fallback: text input for any unknown type
+          textInput(nm, p$label, value = as.character(p$default %||% ""))
+        )
+        desc <- p$description %||% p$help
+        tags$div(class = "param-block", style = "margin-bottom: 8px;",
+          widget,
+          if (!is.null(desc) && nzchar(desc))
+            tags$small(class = "text-muted",
+                       style = "display:block; margin-top:-6px; line-height:1.3;",
+                       desc)
         )
       })
     })
@@ -134,8 +154,9 @@ modellab_server <- function(id, state) {
       for (p in m$params) {
         v <- input[[paste0("param_", p$name)]]
         if (is.null(v)) next
-        if (p$type == "integer") v <- as.integer(v)
-        if (p$type == "numeric") v <- as.numeric(v)
+        if (p$type == "integer" && is.numeric(v)) v <- as.integer(v)
+        if (p$type == "numeric" && is.numeric(v)) v <- as.numeric(v)
+        if (p$type == "logical") v <- isTRUE(v)
         out[[p$name]] <- v
       }
       out
@@ -144,6 +165,13 @@ modellab_server <- function(id, state) {
     # ---- Train! -------------------------------------------------------
     observeEvent(input$train, {
       req(state$prepped, state$meta, input$model_id)
+
+      av <- model_availability(input$model_id)
+      if (!isTRUE(av$ok)) {
+        flash(av$msg %||% "Selected model is not available.", "warning")
+        add_log("SKIP: ", av$msg %||% "model not available")
+        return()
+      }
 
       df <- state$prepped
       target <- state$meta$target

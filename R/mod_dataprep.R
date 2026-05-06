@@ -6,7 +6,35 @@
 
 dataprep_ui <- function(id) {
   ns <- NS(id)
-  layout_columns(
+  tagList(
+    # Premium hero card
+    tags$div(class = "studio-shell", style = "padding:0 0 18px;",
+      tags$div(class = "studio-page",
+        tags$div(class = "studio-hero",
+          tags$div(class = "studio-hero-meta",
+            tags$span(class = "studio-kicker", "DATA PREP"),
+            tags$span(class = "studio-dot", "•"),
+            tags$span(class = "studio-kicker", "EDITORIAL CLEANING")
+          ),
+          tags$h1(class = "studio-headline", "Clean it up. On the record."),
+          tags$p(class = "studio-deck",
+            "Apply a reproducible recipe: drop bad columns, impute, transform, encode. ",
+            "The cleaned dataset is what feeds ", tags$b("Model Lab"), ". ",
+            "Want to look around first? Open ", tags$b("Explore"), "."
+          ),
+          tags$div(class = "studio-rule"),
+          tags$div(style = "margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;",
+            actionButton(ns("goto_explore"),
+                         tagList(HTML("← "), "Open Explore"),
+                         class = "btn-outline-warning"),
+            actionButton(ns("goto_modellab"),
+                         tagList("Continue to Model Lab", HTML(" →")),
+                         class = "btn-primary")
+          )
+        )
+      )
+    ),
+    layout_columns(
     col_widths = c(4, 8),
     card(
       card_header(tagList(icon("wand-magic-sparkles"), "Auto-prepare")),
@@ -60,11 +88,24 @@ dataprep_ui <- function(id) {
       )
     )
   )
+  )
 }
 
-dataprep_server <- function(id, state) {
+dataprep_server <- function(id, state, parent_session = NULL) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+
+    # Cross-links to other top-level tabs
+    observeEvent(input$goto_explore, {
+      if (!is.null(parent_session))
+        bslib::nav_select("main_nav", "2 · Explore",
+                          session = parent_session)
+    })
+    observeEvent(input$goto_modellab, {
+      if (!is.null(parent_session))
+        bslib::nav_select("main_nav", "6 · Model Lab",
+                          session = parent_session)
+    })
 
     profile <- reactive({
       req(state$raw_data)

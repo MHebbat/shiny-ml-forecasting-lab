@@ -178,8 +178,8 @@ server <- function(input, output, session) {
   })
 
   ingest_server("ingest", state)
-  explore_server("explore", state)
-  dataprep_server("dataprep", state)
+  explore_server("explore", state, parent_session = session)
+  dataprep_server("dataprep", state, parent_session = session)
   privacy_server("privacy", state)
   survey_server("survey", state)
   modellab_server("modellab", state)

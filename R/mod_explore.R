@@ -1,56 +1,204 @@
 # =====================================================================
-# Module 2: Explore & Prep
+# Module 2: Explore (read-only diagnostics)
+#
+# Inspect raw data: schema, missingness, target distribution,
+# correlations, prepped preview. Does NOT mutate state$prepped — that's
+# the Data Prep tab's job. The header cross-links to Data Prep.
 # =====================================================================
 
+# ---------------------------------------------------------------------
+# Pure helper: build a correlation summary that survives mixed-type data.
+# Returned list fields:
+#   ok            : TRUE if a matrix was produced
+#   message       : explanation when ok = FALSE
+#   matrix        : the correlation matrix (may be NULL)
+#   pairs         : data.frame(var1, var2, cor, abs_cor) sorted desc
+#   numeric_cols  : names of columns used
+#   method        : echoed back
+# Exported helper so it can be unit-tested without Shiny.
+# ---------------------------------------------------------------------
+explore_correlation <- function(df, method = c("pearson", "spearman", "kendall"),
+                                top_n = 20) {
+  method <- match.arg(method)
+  if (is.null(df) || !is.data.frame(df) || ncol(df) == 0) {
+    return(list(ok = FALSE,
+                message = "No data to compute correlations on.",
+                matrix = NULL, pairs = NULL,
+                numeric_cols = character(0), method = method))
+  }
+  # Coerce haven_labelled (kept by the haven reader) to numeric for cor()
+  coerced <- lapply(df, function(col) {
+    if (inherits(col, "haven_labelled")) return(as.numeric(unclass(col)))
+    col
+  })
+  is_num <- vapply(coerced, function(c) is.numeric(c) || is.logical(c),
+                   logical(1))
+  num <- as.data.frame(coerced[is_num], stringsAsFactors = FALSE)
+
+  # Drop columns that are entirely NA or constant — cor() returns NA for them
+  num <- num[, vapply(num, function(c) {
+    v <- stats::na.omit(c)
+    length(v) >= 2 && stats::sd(v) > 0
+  }, logical(1)), drop = FALSE]
+
+  if (ncol(num) < 2) {
+    return(list(ok = FALSE,
+                message = "Need at least 2 numeric columns to compute correlations.",
+                matrix = NULL, pairs = NULL,
+                numeric_cols = colnames(num), method = method))
+  }
+
+  C <- tryCatch(
+    suppressWarnings(stats::cor(num, use = "pairwise.complete.obs",
+                                method = method)),
+    error = function(e) NULL
+  )
+  if (is.null(C) || !is.matrix(C)) {
+    return(list(ok = FALSE,
+                message = paste0("Correlation could not be computed (",
+                                 method, ")."),
+                matrix = NULL, pairs = NULL,
+                numeric_cols = colnames(num), method = method))
+  }
+
+  # Pair table (upper triangle, no self-correlations)
+  nm <- colnames(C)
+  pairs_df <- data.frame(var1 = character(0), var2 = character(0),
+                         cor = numeric(0), abs_cor = numeric(0),
+                         stringsAsFactors = FALSE)
+  if (length(nm) >= 2) {
+    idx <- which(upper.tri(C), arr.ind = TRUE)
+    if (nrow(idx) > 0) {
+      vals <- C[idx]
+      pairs_df <- data.frame(
+        var1   = nm[idx[, 1]],
+        var2   = nm[idx[, 2]],
+        cor    = round(vals, 4),
+        abs_cor = round(abs(vals), 4),
+        stringsAsFactors = FALSE
+      )
+      pairs_df <- pairs_df[!is.na(pairs_df$cor), , drop = FALSE]
+      pairs_df <- pairs_df[order(-pairs_df$abs_cor), , drop = FALSE]
+      if (!is.null(top_n) && nrow(pairs_df) > top_n)
+        pairs_df <- utils::head(pairs_df, top_n)
+    }
+  }
+
+  list(ok = TRUE, message = NULL, matrix = C, pairs = pairs_df,
+       numeric_cols = nm, method = method)
+}
+
+# ---------------------------------------------------------------------
 explore_ui <- function(id) {
   ns <- NS(id)
-  layout_columns(
-    col_widths = c(4, 8),
-    card(
-      card_header("Recipe / Preprocessing"),
-      conditionalPanel(
-        condition = sprintf("output['%s']", ns("has_data")),
-        checkboxGroupInput(ns("steps"), "Pipeline steps:",
-          choices = c(
-            "Drop columns with >50% missing"     = "drop_high_na",
-            "Median-impute numeric NAs"          = "impute_num",
-            "Mode-impute categorical NAs"        = "impute_cat",
-            "One-hot encode categoricals"        = "dummy",
-            "Standardize numerics (z-score)"     = "scale",
-            "Add time-series lags (h=1..3)"      = "lags",
-            "Add rolling mean (window 7)"        = "rollmean"
+  tagList(
+    # Premium hero card
+    tags$div(class = "studio-shell", style = "padding:0 0 18px;",
+      tags$div(class = "studio-page",
+        tags$div(class = "studio-hero",
+          tags$div(class = "studio-hero-meta",
+            tags$span(class = "studio-kicker", "EXPLORE"),
+            tags$span(class = "studio-dot", "•"),
+            tags$span(class = "studio-kicker", "READ-ONLY DIAGNOSTICS")
           ),
-          selected = c("impute_num","impute_cat")
-        ),
-        hr(),
-        h6("Train / Test split"),
-        sliderInput(ns("split_pct"), "Train %", 0.5, 0.95, 0.8, 0.05),
-        actionButton(ns("apply"), "Apply pipeline",
-                     class = "btn-primary w-100")
-      ),
-      conditionalPanel(
-        condition = sprintf("!output['%s']", ns("has_data")),
-        tags$div(class = "alert alert-warning",
-                 "Upload & save a dataset first.")
+          tags$h1(class = "studio-headline", "Look before you leap."),
+          tags$p(class = "studio-deck",
+            "Inspect your raw data: distributions, correlations, missingness, sample rows. ",
+            "Nothing is changed here. When you're ready to clean it up, head to ",
+            tags$b("Data Prep"), "."
+          ),
+          tags$div(class = "studio-rule"),
+          tags$div(style = "margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;",
+            actionButton(ns("goto_dataprep"),
+                         tagList("Open Data Prep", HTML(" →")),
+                         class = "btn-warning"),
+            actionButton(ns("goto_ingest"),
+                         tagList(HTML("← "), "Back to Ingest"),
+                         class = "btn-outline-secondary")
+          )
+        )
       )
     ),
-    navset_card_underline(
-      title = "Diagnostics",
-      nav_panel("Schema",     withSpinner(DT::DTOutput(ns("schema")))),
-      nav_panel("Missingness",withSpinner(plotlyOutput(ns("miss_plot"), height = "350px"))),
-      nav_panel("Target",     withSpinner(plotlyOutput(ns("target_plot"), height = "350px"))),
-      nav_panel("Correlation",withSpinner(plotlyOutput(ns("cor_plot"),    height = "450px"))),
-      nav_panel("Prepped data", withSpinner(DT::DTOutput(ns("prepped"))))
+
+    layout_columns(
+      col_widths = c(4, 8),
+      card(
+        card_header("Recipe / Preprocessing (legacy)"),
+        conditionalPanel(
+          condition = sprintf("output['%s']", ns("has_data")),
+          tags$small(class = "text-muted",
+            "Quick recipe shortcut. For the full pipeline, use Data Prep."),
+          checkboxGroupInput(ns("steps"), "Pipeline steps:",
+            choices = c(
+              "Drop columns with >50% missing"     = "drop_high_na",
+              "Median-impute numeric NAs"          = "impute_num",
+              "Mode-impute categorical NAs"        = "impute_cat",
+              "One-hot encode categoricals"        = "dummy",
+              "Standardize numerics (z-score)"     = "scale",
+              "Add time-series lags (h=1..3)"      = "lags",
+              "Add rolling mean (window 7)"        = "rollmean"
+            ),
+            selected = c("impute_num","impute_cat")
+          ),
+          hr(),
+          h6("Train / Test split"),
+          sliderInput(ns("split_pct"), "Train %", 0.5, 0.95, 0.8, 0.05),
+          actionButton(ns("apply"), "Apply pipeline",
+                       class = "btn-primary w-100")
+        ),
+        conditionalPanel(
+          condition = sprintf("!output['%s']", ns("has_data")),
+          tags$div(class = "alert alert-warning",
+                   "Upload & save a dataset first.")
+        )
+      ),
+      navset_card_underline(
+        title = "Diagnostics",
+        nav_panel("Schema",     withSpinner(DT::DTOutput(ns("schema")))),
+        nav_panel("Missingness",withSpinner(plotlyOutput(ns("miss_plot"), height = "350px"))),
+        nav_panel("Target",     withSpinner(plotlyOutput(ns("target_plot"), height = "350px"))),
+        nav_panel("Correlation",
+          tagList(
+            tags$div(style = "padding:8px 4px 12px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;",
+              tags$div(style = "min-width:160px;",
+                selectInput(ns("cor_method"), "Method",
+                            choices = c("Pearson"="pearson",
+                                        "Spearman"="spearman",
+                                        "Kendall"="kendall"),
+                            selected = "pearson")),
+              tags$div(style = "min-width:120px;",
+                numericInput(ns("cor_top_n"), "Top |cor| pairs",
+                             value = 20, min = 5, max = 200, step = 5))
+            ),
+            uiOutput(ns("cor_msg")),
+            withSpinner(plotlyOutput(ns("cor_plot"), height = "450px")),
+            tags$h6("Top correlated pairs", style = "margin-top:12px;"),
+            DT::DTOutput(ns("cor_pairs"))
+          )),
+        nav_panel("Prepped data", withSpinner(DT::DTOutput(ns("prepped"))))
+      )
     )
   )
 }
 
-explore_server <- function(id, state) {
+explore_server <- function(id, state, parent_session = NULL) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
     output$has_data <- reactive({ !is.null(state$raw_data) })
     outputOptions(output, "has_data", suspendWhenHidden = FALSE)
+
+    # Cross-links to other top-level tabs
+    observeEvent(input$goto_dataprep, {
+      if (!is.null(parent_session))
+        bslib::nav_select("main_nav", "3 · Data Prep",
+                          session = parent_session)
+    })
+    observeEvent(input$goto_ingest, {
+      if (!is.null(parent_session))
+        bslib::nav_select("main_nav", "1 · Data Ingest",
+                          session = parent_session)
+    })
 
     # Schema
     output$schema <- DT::renderDT({
@@ -101,16 +249,72 @@ explore_server <- function(id, state) {
       }
     })
 
-    # Correlation
-    output$cor_plot <- renderPlotly({
+    # ---- Correlation -----------------------------------------------
+    cor_result <- reactive({
       req(state$raw_data)
-      num <- state$raw_data[, sapply(state$raw_data, is.numeric), drop = FALSE]
-      if (ncol(num) < 2) return(plotly_empty())
-      C <- cor(num, use = "pairwise.complete.obs")
-      plot_ly(x = colnames(C), y = colnames(C), z = C,
-              type = "heatmap", colors = colorRamp(c("#d9534f","#ffffff","#3fb950"))) |>
+      explore_correlation(state$raw_data,
+                          method = input$cor_method %||% "pearson",
+                          top_n  = input$cor_top_n %||% 20)
+    })
+
+    output$cor_msg <- renderUI({
+      r <- cor_result()
+      if (isTRUE(r$ok)) {
+        tags$div(class = "text-muted",
+                 style = "font-size:0.85em; margin: 4px 4px 8px;",
+                 sprintf("%d numeric column(s) used · method: %s · NAs handled pairwise",
+                         length(r$numeric_cols), r$method))
+      } else {
+        tags$div(class = "alert alert-warning",
+                 style = "padding:8px 10px; font-size:0.9em;",
+                 icon("triangle-exclamation"),
+                 " ", r$message %||% "No correlation available.")
+      }
+    })
+
+    output$cor_plot <- renderPlotly({
+      r <- cor_result()
+      if (!isTRUE(r$ok)) return(plotly_empty(type = "scatter") |>
         layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"))
+               font = list(color = "#c9d1d9")))
+      C <- r$matrix
+      # Heatmap with cell text (no extra package dependency)
+      txt <- formatC(C, format = "f", digits = 2)
+      plot_ly(
+        x = colnames(C), y = colnames(C), z = C,
+        type = "heatmap",
+        text = txt, hovertemplate = "%{x} ↔ %{y}<br>r = %{z:.3f}<extra></extra>",
+        zmin = -1, zmax = 1,
+        colorscale = list(
+          c(0,   "#d9534f"),
+          c(0.5, "#0d1117"),
+          c(1,   "#3fb950"))
+      ) |>
+        add_annotations(
+          x = rep(colnames(C), each = nrow(C)),
+          y = rep(rownames(C), times = ncol(C)),
+          text = as.vector(txt),
+          showarrow = FALSE,
+          font = list(size = 10, color = "#c9d1d9")
+        ) |>
+        layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
+               font = list(color = "#c9d1d9"),
+               xaxis = list(tickangle = -45),
+               margin = list(l = 80, b = 80))
+    })
+
+    output$cor_pairs <- DT::renderDT({
+      r <- cor_result()
+      if (!isTRUE(r$ok) || is.null(r$pairs) || nrow(r$pairs) == 0) {
+        return(DT::datatable(
+          data.frame(message = r$message %||%
+                       "No correlated pairs to display."),
+          options = list(dom = "t"), rownames = FALSE))
+      }
+      DT::datatable(r$pairs,
+        options = list(pageLength = 10, dom = "tip",
+                       order = list(list(3, "desc"))),
+        rownames = FALSE, class = "compact stripe")
     })
 
     # ---- Apply pipeline ----------------------------------------------
