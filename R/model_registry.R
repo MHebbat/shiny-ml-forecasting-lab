@@ -211,6 +211,7 @@ lstm_make_supervised <- function(y, timesteps, target_col = NULL) {
 
 # Linear regression
 fit_lm <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Linear regression")
   intercept <- isTRUE(params$intercept %||% TRUE)
   na_action <- params$na_action %||% "na.omit"
   rhs <- if (intercept) "." else ". - 1"
@@ -226,6 +227,7 @@ fit_lm <- function(df, target, params, time_col = NULL) {
 
 # Logistic regression
 fit_logit <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Logistic regression")
   df[[target]] <- as.factor(df[[target]])
   link <- params$link %||% "logit"
   f <- as.formula(paste(target, "~ ."))
@@ -244,6 +246,7 @@ fit_logit <- function(df, target, params, time_col = NULL) {
 
 # Glmnet (regression or classification)
 fit_glmnet <- function(df, target, params, time_col = NULL, family = "gaussian") {
+  .assert_train_shapes(df[[target]], df, "glmnet")
   if (!.has("glmnet")) stop("Install 'glmnet'")
   x <- model.matrix(as.formula(paste(target, "~ . -1")), data = df)
   y <- df[[target]]
@@ -291,6 +294,7 @@ fit_glmnet <- function(df, target, params, time_col = NULL, family = "gaussian")
 
 # GAM
 fit_gam <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "GAM")
   if (!.has("mgcv")) stop("Install 'mgcv'")
   num_cols <- setdiff(names(df)[sapply(df, is.numeric)], target)
   k_val <- as.integer(params$k %||% -1)
@@ -315,6 +319,7 @@ fit_gam <- function(df, target, params, time_col = NULL) {
 
 # Random forest via ranger
 fit_ranger <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "Random forest (ranger)")
   if (!.has("ranger")) stop("Install 'ranger'")
   if (classification) df[[target]] <- as.factor(df[[target]])
 
@@ -356,6 +361,7 @@ fit_ranger <- function(df, target, params, time_col = NULL, classification = FAL
 
 # XGBoost
 fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "XGBoost")
   if (!.has("xgboost")) stop("Install 'xgboost'")
   y <- df[[target]]
   if (classification && is.character(y)) y <- as.factor(y)
@@ -432,6 +438,7 @@ fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE)
 
 # Poisson / NegBin
 fit_poisson <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Poisson GLM")
   link <- params$link %||% "log"
   m <- glm(as.formula(paste(target, "~ .")), data = df,
            family = poisson(link = link),
@@ -442,6 +449,7 @@ fit_poisson <- function(df, target, params, time_col = NULL) {
        feat_imp = NULL)
 }
 fit_negbin <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Negative binomial")
   if (!.has("MASS")) stop("Install 'MASS'")
   link <- params$link %||% "log"
   m <- MASS::glm.nb(as.formula(paste(target, "~ .")), data = df,
@@ -456,6 +464,7 @@ fit_negbin <- function(df, target, params, time_col = NULL) {
 
 # Beta regression
 fit_betareg <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Beta regression")
   if (!.has("betareg")) stop("Install 'betareg'")
   link     <- params$link %||% "logit"
   link_phi <- params$link_phi %||% "log"
@@ -469,6 +478,7 @@ fit_betareg <- function(df, target, params, time_col = NULL) {
 # ---- Time series ------------------------------------------------------
 # ARIMA via forecast
 fit_arima <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "ARIMA")
   if (!.has("forecast")) stop("Install 'forecast'")
   y <- as.numeric(df[[target]])
   freq <- as.numeric(params$ts_frequency %||% 12)
@@ -503,6 +513,7 @@ fit_arima <- function(df, target, params, time_col = NULL) {
 
 # ETS
 fit_ets <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "ETS")
   if (!.has("forecast")) stop("Install 'forecast'")
   y <- as.numeric(df[[target]])
   freq <- as.numeric(params$ts_frequency %||% 12)
@@ -529,6 +540,7 @@ fit_ets <- function(df, target, params, time_col = NULL) {
 
 # TBATS
 fit_tbats <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "TBATS")
   if (!.has("forecast")) stop("Install 'forecast'")
   y <- as.numeric(df[[target]])
   freq <- as.numeric(params$ts_frequency %||% 12)
@@ -560,6 +572,7 @@ fit_tbats <- function(df, target, params, time_col = NULL) {
 
 # Prophet (optional)
 fit_prophet <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Prophet")
   if (!.has("prophet"))
     stop("Prophet not installed - run install.packages('prophet') to enable")
   if (is.null(time_col)) stop("Prophet requires a time column")
@@ -609,6 +622,7 @@ fit_prophet <- function(df, target, params, time_col = NULL) {
 # ---- Python-backed wrappers -------------------------------------------
 # LightGBM via reticulate
 fit_lightgbm_py <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "LightGBM")
   if (!py_is_available()) stop("Python not available; install reticulate + lightgbm")
   task <- if (classification) "classification" else "regression"
   X <- df[, setdiff(names(df), target), drop = FALSE]
@@ -629,6 +643,7 @@ fit_lightgbm_py <- function(df, target, params, time_col = NULL, classification 
 
 # CatBoost via reticulate
 fit_catboost_py <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "CatBoost")
   if (!py_is_available()) stop("Python not available; install reticulate + catboost")
   task <- if (classification) "classification" else "regression"
   X <- df[, setdiff(names(df), target), drop = FALSE]
@@ -654,12 +669,20 @@ fit_catboost_py <- function(df, target, params, time_col = NULL, classification 
 #   - TSLSTMplus: univariate-only convenience fallback for time-series.
 # fit_lstm dispatches between them based on availability and task.
 fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "LSTM")
   task <- if (classification) "classification" else "time_series"
 
   k <- .resolve_keras_backend()       # list(ok, backend, ns, reason)
   use_tslstm <- .has("TSLSTMplus")
 
   timesteps <- as.integer(params$timesteps %||% 12)
+  val_split <- as.numeric(params$validation_split %||% 0)
+  .nrow_df <- nrow(df)
+  .effective_train <- floor(.nrow_df * (1 - max(0, min(0.99, val_split))))
+  if (!is.na(timesteps) && timesteps >= .effective_train)
+    stop(sprintf(
+      "LSTM: timesteps (%d) must be smaller than the effective training length (%d rows). Reduce timesteps or lower validation_split.",
+      timesteps, .effective_train), call. = FALSE)
   bidirectional <- isTRUE(params$bidirectional %||% FALSE)
   units <- as.integer(params$units %||% 64)
   layers_n <- as.integer(params$layers %||% 1)
@@ -768,7 +791,11 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
         model$compile(optimizer = build_optimizer(),
                       loss = loss_for_task(),
                       metrics = list("accuracy"))
-        hist <- model$fit(Xtr, ytr, epochs = epochs, batch_size = batch,
+        .assert_lstm_shapes(Xtr, ytr, model_label = "LSTM (classification)")
+        Xtr_t <- lstm_as_float_tensor(Xtr, backend = k$backend)
+        ytr_t <- lstm_as_int_tensor(ytr,   backend = k$backend)
+        hist <- model$fit(x = Xtr_t, y = ytr_t,
+                          epochs = epochs, batch_size = batch,
                           verbose = 0L, callbacks = build_callbacks())
 
         list(model = model,
@@ -786,7 +813,8 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
                  Xn <- array(seq_len(nrow(newdata)),
                              dim = c(nrow(newdata), 1L, 1L))
                }
-               probs <- model$predict(Xn, verbose = 0L)
+               Xn_t <- lstm_as_float_tensor(Xn, backend = k$backend)
+               probs <- model$predict(Xn_t, verbose = 0L)
                idx <- apply(probs, 1, which.max)
                classes[idx]
              },
@@ -828,7 +856,11 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
         out_t <- K("layer_dense")(units = 1L)(z)
         model <- K("keras_model")(inp, out_t)
         model$compile(optimizer = build_optimizer(), loss = loss_for_task())
-        hist <- model$fit(sup$X, sup$y, epochs = epochs, batch_size = batch,
+        .assert_lstm_shapes(sup$X, sup$y, model_label = "LSTM")
+        Xtr_t <- lstm_as_float_tensor(sup$X, backend = k$backend)
+        ytr_t <- lstm_as_float_tensor(sup$y, backend = k$backend)
+        hist <- model$fit(x = Xtr_t, y = ytr_t,
+                          epochs = epochs, batch_size = batch,
                           verbose = 0L, callbacks = build_callbacks())
 
         # Cache the last training window for recursive forecasting
@@ -856,7 +888,8 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
                  win <- last_window
                  for (i in seq_len(h)) {
                    Xn <- array(win, dim = c(1L, timesteps, 1L))
-                   p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
+                   Xn_t <- lstm_as_float_tensor(Xn, backend = k$backend)
+                   p <- as.numeric(model$predict(Xn_t, verbose = 0L))[1]
                    yhat <- c(yhat, p)
                    win <- c(win[-1], p)
                  }
@@ -869,7 +902,8 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
                  for (i in seq_len(h)) {
                    Xn <- array(as.numeric(win),
                                dim = c(1L, timesteps, n_features))
-                   p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
+                   Xn_t <- lstm_as_float_tensor(Xn, backend = k$backend)
+                   p <- as.numeric(model$predict(Xn_t, verbose = 0L))[1]
                    yhat <- c(yhat, p)
                    new_row <- c(last_feat, p)
                    win <- rbind(win[-1, , drop = FALSE], new_row)
@@ -887,8 +921,18 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
                history = hist$history))
       }
     }, error = function(e) {
+      py_detail <- tryCatch({
+        if (requireNamespace("reticulate", quietly = TRUE)) {
+          pe <- reticulate::py_last_error()
+          if (!is.null(pe)) {
+            paste0("\n  py_last_error: ",
+                   pe$type %||% "", ": ", pe$value %||% "",
+                   if (!is.null(pe$message)) paste0(" | ", pe$message) else "")
+          } else ""
+        } else ""
+      }, error = function(e2) "")
       message("LSTM keras backend (", k$backend, ") failed: ",
-              conditionMessage(e),
+              conditionMessage(e), py_detail,
               " - falling back to TSLSTMplus if available.")
       NULL
     })
@@ -928,6 +972,7 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
 
 # ---- KAN (Kolmogorov-Arnold Network) ---------------------------------
 fit_kan <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "KAN")
   if (!py_is_available())
     stop("KAN requires Python; run reticulate::py_install(c('pykan','torch'))")
   task <- if (classification) "classification" else "regression"
@@ -983,6 +1028,7 @@ fit_kan <- function(df, target, params, time_col = NULL, classification = FALSE)
 
 # Keras MLP via reticulate (Python TF)
 fit_mlp_py <- function(df, target, params, time_col = NULL, classification = FALSE) {
+  .assert_train_shapes(df[[target]], df, "Keras MLP")
   if (!py_is_available()) stop("Python not available; install reticulate + tensorflow")
   task <- if (classification) "classification" else "regression"
   X <- df[, setdiff(names(df), target), drop = FALSE]

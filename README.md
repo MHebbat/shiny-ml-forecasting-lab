@@ -28,6 +28,15 @@ make install && make run
 
 The launcher checks for `Rscript`, installs missing R packages (idempotent), and opens the app at `http://127.0.0.1:4848`. Full instructions in [`SETUP.md`](SETUP.md).
 
+For a fresh install with one command (R packages + Python TF/Keras venv + parse check), use:
+
+```bash
+Rscript setup.R              # full install
+Rscript setup.R --dry-run    # preview, no changes
+```
+
+Wrappers are also provided as `./setup.sh` (macOS/Linux) and `.\setup.ps1` (Windows).
+
 ## Features
 
 - **Multi-format ingest**: CSV / TSV / TXT / XLSX / Parquet / JSON / RDS, plus **Stata `.dta`**, **SPSS `.sav`/`.por`**, and **SAS `.sas7bdat`/`.xpt`** via [`haven`](https://haven.tidyverse.org/) — variable and value labels are preserved and surfaced in Explore, Survey, and Codebook views

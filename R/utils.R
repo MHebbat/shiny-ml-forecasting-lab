@@ -111,6 +111,36 @@ req_pkg <- function(pkg) {
     stop(sprintf("Package '%s' is required. install.packages('%s')", pkg, pkg))
 }
 
+# ---- Training-shape guards -------------------------------------------
+# Called from the top of each fit_* branch to surface clear errors when
+# upstream Data Prep / validation-splitting produced an empty or
+# misshapen training set.
+.assert_train_shapes <- function(y, X, model_label) {
+  ny <- length(y); nX <- if (is.null(dim(X))) length(X) else nrow(X)
+  if (ny == 0L || nX == 0L)
+    stop(sprintf("Cannot train %s: training set is empty (y=%d, X=%d). ",
+                 model_label, ny, nX),
+         "This usually means Data Prep removed all rows or all predictors. ",
+         "Check the recipe and the validation split.", call. = FALSE)
+  if (ny != nX)
+    stop(sprintf("Cannot train %s: y has %d obs but X has %d rows (internal pipeline bug).",
+                 model_label, ny, nX), call. = FALSE)
+  invisible(TRUE)
+}
+
+.assert_lstm_shapes <- function(x, y, model_label = "LSTM") {
+  if (length(dim(x)) != 3L)
+    stop(sprintf("Cannot train %s: expected 3D array (samples, timesteps, features), got dims=%s",
+                 model_label, paste(dim(x), collapse = "x")), call. = FALSE)
+  if (dim(x)[1] == 0L || length(y) == 0L)
+    stop(sprintf("Cannot train %s: empty training arrays. Check timesteps vs n_rows and val_split.",
+                 model_label), call. = FALSE)
+  if (dim(x)[1] != length(y))
+    stop(sprintf("Cannot train %s: x has %d windows but y has %d targets.",
+                 model_label, dim(x)[1], length(y)), call. = FALSE)
+  invisible(TRUE)
+}
+
 # ---- Metric helpers ---------------------------------------------------
 calc_regression_metrics <- function(actual, predicted) {
   ok <- complete.cases(actual, predicted)
