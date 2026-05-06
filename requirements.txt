@@ -1,0 +1,17 @@
+# Python deps used via reticulate.
+# Install only what you actually want to use; everything is optional except pandas/numpy.
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+
+# Boosting
+lightgbm>=4.0
+xgboost>=2.0
+catboost>=1.2
+
+# Deep learning (heavy — install only if you want the MLP/Keras path)
+tensorflow>=2.15
+
+# Optional time-series DL
+# torch>=2.2
+# neuralprophet>=0.8

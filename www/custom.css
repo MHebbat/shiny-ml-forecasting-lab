@@ -1,0 +1,33 @@
+/* Custom theme polish for Shiny ML & Forecasting Lab */
+body { background: #0d1117 !important; }
+
+.navbar { border-bottom: 1px solid #30363d; }
+.card-header { padding: 10px 14px; }
+.btn-primary { font-weight: 600; }
+.alert { border: none; }
+
+.dataTables_wrapper { color: #c9d1d9; }
+table.dataTable thead { background: #161b22; }
+table.dataTable tbody tr { background: #0d1117; }
+table.dataTable.stripe tbody tr.odd { background: #161b22; }
+table.dataTable tbody tr:hover { background: #1f2937 !important; }
+
+.shiny-input-container { color: #c9d1d9; }
+.form-control, .form-select {
+  background: #161b22; color: #c9d1d9; border-color: #30363d;
+}
+.form-control:focus, .form-select:focus {
+  background: #161b22; color: #c9d1d9; border-color: #3fb950;
+  box-shadow: 0 0 0 .2rem rgba(63,185,80,.25);
+}
+
+.shiny-notification {
+  background: #161b22 !important;
+  color: #c9d1d9 !important;
+  border: 1px solid #3fb950 !important;
+}
+
+pre {
+  background: #0d1117; color: #c9d1d9;
+  border: 1px solid #30363d; padding: 10px;
+}

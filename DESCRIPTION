@@ -1,0 +1,15 @@
+Package: shinyMLLab
+Title: Shiny ML & Forecasting Lab
+Version: 0.1.0
+Authors@R:
+    person("Malik", "Hebbat", role = c("aut", "cre"))
+Description: A pure R Shiny application for end-to-end predictive modeling.
+    Upload structured or unstructured data at any cadence (daily, weekly,
+    monthly, quarterly, yearly), choose from a curated registry of regression,
+    classification, count, proportion, and time-series models, tune
+    hyperparameters in the UI, run forecasts over configurable horizons, and
+    persist every run to SQLite for comparison. Python interop via reticulate
+    is optional and used only for LightGBM, CatBoost, and Keras MLP wrappers.
+License: MIT
+Encoding: UTF-8
+RoxygenNote: 7.3.0
