@@ -320,9 +320,9 @@ dashboard_server <- function(id, state) {
     ai_result <- reactiveVal(NULL)
 
     # Auto-load existing analysis when a run is selected
-    observeEvent(state$last_run_id, {
-      if (is.null(state$last_run_id)) return()
-      a <- db_get_analysis(state$last_run_id)
+    observeEvent(state$last_run_id, ignoreNULL = TRUE, ignoreInit = TRUE, {
+      req(state$last_run_id)
+      a <- tryCatch(db_get_analysis(state$last_run_id), error = function(e) NULL)
       if (!is.null(a)) {
         ai_result(list(grade = a$grade, verdict = a$verdict,
                        analysis_md = a$analysis_md,

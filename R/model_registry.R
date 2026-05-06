@@ -47,14 +47,25 @@ fit_glmnet <- function(df, target, params, time_col = NULL, family = "gaussian")
   if (!.has("glmnet")) stop("Install 'glmnet'")
   x <- model.matrix(as.formula(paste(target, "~ . -1")), data = df)
   y <- df[[target]]
+  train_cols <- colnames(x)               # captured at training time
+  train_df_cols <- setdiff(colnames(df), target)
   alpha <- params$alpha %||% 1
   m <- glmnet::cv.glmnet(x, y, alpha = alpha, family = family,
                          nfolds = params$nfolds %||% 5)
   list(model = m,
        predict = function(newdata, h = NULL) {
-         nx <- model.matrix(as.formula(paste(target, "~ . -1")),
-                            data = newdata[, colnames(newdata) %in% colnames(df), drop = FALSE])
-         out <- predict(m, newx = nx, s = "lambda.min",
+         # Add a dummy target so model.matrix has same formula behaviour
+         if (!target %in% colnames(newdata)) newdata[[target]] <- y[1]
+         # Drop unseen columns, keep only original training feature cols
+         keep <- intersect(train_df_cols, colnames(newdata))
+         newdata <- newdata[, c(keep, target), drop = FALSE]
+         nx <- model.matrix(as.formula(paste(target, "~ . -1")), data = newdata)
+         # Align columns to training set; missing cols -> 0, drop unseen levels
+         aligned <- matrix(0, nrow = nrow(nx), ncol = length(train_cols),
+                            dimnames = list(NULL, train_cols))
+         common <- intersect(colnames(nx), train_cols)
+         if (length(common) > 0) aligned[, common] <- nx[, common, drop = FALSE]
+         out <- predict(m, newx = aligned, s = "lambda.min",
                         type = if (family == "binomial") "class" else "response")
          as.numeric(out)
        },
@@ -101,7 +112,11 @@ fit_ranger <- function(df, target, params, time_col = NULL, classification = FAL
 fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE) {
   if (!.has("xgboost")) stop("Install 'xgboost'")
   y <- df[[target]]
+  # Coerce character to factor for classification so unseen levels can be ignored later
+  if (classification && is.character(y)) y <- as.factor(y)
   X <- model.matrix(as.formula(paste(target, "~ . -1")), data = df)
+  train_cols <- colnames(X)
+  train_df_cols <- setdiff(colnames(df), target)
   obj <- if (classification) {
     if (length(unique(y)) == 2) "binary:logistic" else "multi:softprob"
   } else "reg:squarederror"
@@ -122,9 +137,22 @@ fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE)
   imp <- tryCatch(xgboost::xgb.importance(model = m), error = function(e) NULL)
   list(model = m,
        predict = function(newdata, h = NULL) {
-         nx <- model.matrix(as.formula(paste(target, "~ . -1")),
-                            data = newdata[, colnames(newdata) %in% colnames(df), drop = FALSE])
-         p <- predict(m, nx)
+         if (!target %in% colnames(newdata)) newdata[[target]] <- y[1]
+         keep <- intersect(train_df_cols, colnames(newdata))
+         newdata <- newdata[, c(keep, target), drop = FALSE]
+         # Coerce factors so unseen levels can be filtered safely
+         for (col in keep) {
+           if (is.character(newdata[[col]])) newdata[[col]] <- as.factor(newdata[[col]])
+         }
+         nx <- tryCatch(
+           model.matrix(as.formula(paste(target, "~ . -1")), data = newdata),
+           error = function(e) matrix(0, nrow = nrow(newdata), ncol = 0)
+         )
+         aligned <- matrix(0, nrow = nrow(newdata), ncol = length(train_cols),
+                            dimnames = list(NULL, train_cols))
+         common <- intersect(colnames(nx), train_cols)
+         if (length(common) > 0) aligned[, common] <- nx[, common, drop = FALSE]
+         p <- predict(m, aligned)
          if (classification && length(unique(y)) == 2) {
            lev <- levels(as.factor(y))
            lev[ifelse(p > 0.5, 2, 1)]

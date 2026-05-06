@@ -3,11 +3,22 @@
 # Stores: datasets metadata, runs, predictions, hyperparameters
 # =====================================================================
 
-DB_PATH <- "db/app.sqlite"
+# Resolve DB path relative to the app root regardless of working directory
+.app_root <- function() {
+  # Prefer SHINYML_HOME env var; otherwise walk up from this file's dir
+  env_home <- Sys.getenv("SHINYML_HOME", unset = "")
+  if (nzchar(env_home) && dir.exists(env_home)) return(normalizePath(env_home, mustWork = FALSE))
+  # Fall back to current working directory
+  normalizePath(getwd(), mustWork = FALSE)
+}
+
+DB_DIR  <- function() file.path(.app_root(), "db")
+DB_PATH <- function() file.path(DB_DIR(), "app.sqlite")
 
 db_con <- function() {
-  dir.create("db", showWarnings = FALSE)
-  DBI::dbConnect(RSQLite::SQLite(), DB_PATH)
+  d <- DB_DIR()
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  DBI::dbConnect(RSQLite::SQLite(), DB_PATH())
 }
 
 db_init <- function() {

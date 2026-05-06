@@ -7,11 +7,26 @@ A **pure R Shiny** application for end-to-end predictive modeling — upload dat
 R is the primary language. **Python (via [`reticulate`](https://rstudio.github.io/reticulate/)) is optional** — used only for the LightGBM / CatBoost / Keras-MLP wrappers. The app degrades gracefully if Python is not configured.
 
 ```
-┌────────────┐  ┌────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐
-│ 1. Ingest  │→ │ 2. Explore │→ │ 3. Model Lab │→ │ 4. Predict   │→ │ 5. Runs    │
-│  + schema  │  │  + recipe  │  │  + tune      │  │  + horizon   │  │  leaderboard│
-└────────────┘  └────────────┘  └──────────────┘  └──────────────┘  └────────────┘
+Ingest → Explore → Model Lab → Predict → Dashboard → Editorial Studio → Runs
 ```
+
+## Quick start (Mac · Windows · Linux — identical experience)
+
+```bash
+git clone https://github.com/MHebbat/shiny-ml-forecasting-lab.git
+cd shiny-ml-forecasting-lab
+
+# macOS / Linux
+./run.sh
+
+# Windows
+run.bat
+
+# Or with make
+make install && make run
+```
+
+The launcher checks for `Rscript`, installs missing R packages (idempotent), and opens the app at `http://127.0.0.1:4848`. Full instructions in [`SETUP.md`](SETUP.md).
 
 ## Features
 
@@ -29,6 +44,7 @@ R is the primary language. **Python (via [`reticulate`](https://rstudio.github.i
 - **Forecast horizon** configurable per run (steps mapped to your declared frequency)
 - **🔥 Results Dashboard** auto-opens after every run — KPI tiles, fit plot, full residual diagnostics (residuals-vs-fitted, histogram, Q-Q, ACF), searchable per-row prediction table, and a flat searchable stat-cards view for every metric, hyperparameter, and diagnostic.
 - **🤖 AI Verdict** — one click sends the run to OpenAI, Anthropic, or Perplexity for an objective, blunt assessment (PASS / WEAK / FAIL grade, residual critique, concrete next-step suggestions). Falls back to a deterministic heuristic verdict if no API key is set so the feature always works.
+- **📰 Editorial Studio** — magazine-style presentation of the latest run: hero headline, deck, gold-accent metric grid, hero forecast plot, pull-quote, and one-click PNG / standalone-HTML export. Three layouts (Cover · Spread · Minimal) with Playfair Display + Inter typography.
 - **Searchable Stats Explorer** — every metric / hyperparameter / diagnostic across every run, flattened into one DataTable with global + per-column search and CSV / Excel export. Find every `xgboost` run with `eta=0.05` in one filter.
 - **Persistence**: every run, hyperparameter set, prediction, and AI analysis is stored in `db/app.sqlite`
 - **Leaderboard**: compare runs across datasets / models / metrics

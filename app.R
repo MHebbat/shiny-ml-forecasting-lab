@@ -42,6 +42,7 @@ source("R/mod_explore.R", local = TRUE)
 source("R/mod_modellab.R", local = TRUE)
 source("R/mod_predict.R", local = TRUE)
 source("R/mod_dashboard.R", local = TRUE)
+source("R/mod_studio.R", local = TRUE)
 source("R/mod_runs.R", local = TRUE)
 
 # ---- Initialize DB on startup ----------------------------------------
@@ -66,6 +67,9 @@ ui <- page_navbar(
 
   header = tags$head(
     tags$link(rel = "stylesheet", href = "custom.css"),
+    tags$link(rel = "stylesheet", href = "studio.css"),
+    tags$link(rel = "stylesheet",
+              href = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;900&family=Inter:wght@300;400;500;600;700&display=swap"),
     tags$style(HTML("
       .nav-link.active { font-weight:600 !important; }
       .card { border: 1px solid #30363d; }
@@ -102,7 +106,12 @@ ui <- page_navbar(
     dashboard_ui("dashboard")
   ),
   nav_panel(
-    "6 · Runs & Compare",
+    "6 · Editorial Studio",
+    icon = icon("newspaper"),
+    studio_ui("studio")
+  ),
+  nav_panel(
+    "7 · Runs & Compare",
     icon = icon("trophy"),
     runs_ui("runs")
   ),
@@ -146,6 +155,7 @@ server <- function(input, output, session) {
   modellab_server("modellab", state)
   predict_server("predict", state)
   dashboard_server("dashboard", state)
+  studio_server("studio", state)
   runs_server("runs", state)
 
   # Auto-jump to Results Dashboard whenever a new run finishes

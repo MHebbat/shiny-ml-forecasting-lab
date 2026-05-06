@@ -86,12 +86,16 @@ predict_server <- function(id, state) {
       } else {
         # Apply to new uploaded file or to the holdout already in last_model
         if (!is.null(input$new_file)) {
-          newdf <- read_uploaded(input$new_file$datapath, input$new_file$name)
-          # Apply the same minimal prep: drop target if present, drop time col
+          newdf <- tryCatch(read_uploaded(input$new_file$datapath, input$new_file$name),
+                            error = function(e) { flash(conditionMessage(e), "error"); NULL })
+          req(newdf)
+          if (nrow(newdf) == 0) { flash("Uploaded file has no rows", "error"); return() }
           newdf[[state$meta$target]] <- NULL
           if (!is.null(state$meta$time_col) && state$meta$time_col != "(none)")
             newdf[[state$meta$time_col]] <- NULL
-          out <- fit$predict(newdf)
+          out <- tryCatch(fit$predict(newdf),
+                          error = function(e) { flash(conditionMessage(e), "error"); NULL })
+          req(out); req(length(out) > 0)
           d <- data.frame(predicted = as.numeric(out))
           pred_data(d)
           flash(sprintf("Predicted %d new rows", nrow(d)), "message")

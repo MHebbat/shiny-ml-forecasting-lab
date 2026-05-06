@@ -1,0 +1,166 @@
+/* =====================================================================
+   Editorial Graphic Studio - magazine-style theming
+   Playfair Display (display) + Inter (body), gold accent (#d4af37)
+   ===================================================================== */
+
+.studio-shell {
+  --paper:  #0d0d0f;
+  --ink:    #f5f3ee;
+  --muted:  #8a8a8a;
+  --rule:   #2a2a2a;
+  --gold:   #d4af37;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 16px 28px 48px;
+  min-height: 100vh;
+}
+
+/* ---- Toolbar ---- */
+.studio-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 0 18px; border-bottom: 1px solid var(--rule);
+  margin-bottom: 28px;
+}
+.studio-toolbar-right { display: flex; gap: 8px; align-items: center; }
+.studio-toolbar-right .form-group, .studio-toolbar-right .shiny-input-container {
+  margin-bottom: 0 !important;
+}
+.studio-issue {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600; letter-spacing: .25em; font-size: 11px;
+  color: var(--gold); text-transform: uppercase;
+}
+
+/* ---- Empty state ---- */
+.studio-empty {
+  text-align: center; padding: 120px 20px;
+}
+.studio-empty h1 {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 72px; font-weight: 900; color: var(--ink); margin: 0;
+}
+.studio-empty-sub { color: var(--muted); margin-top: 16px; font-size: 15px; }
+
+/* ---- Page (canvas) ---- */
+.studio-page {
+  background: var(--paper);
+  padding: 32px 24px 24px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  position: relative;
+}
+.studio-page::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--gold) 0%, transparent 100%);
+}
+
+/* ---- Hero ---- */
+.studio-hero { margin-bottom: 28px; }
+.studio-hero-meta {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 18px;
+  font-family: 'Inter', sans-serif;
+}
+.studio-kicker {
+  font-size: 11px; font-weight: 600; letter-spacing: .22em;
+  color: var(--muted); text-transform: uppercase;
+}
+.studio-dot { color: var(--rule); }
+.studio-grade {
+  font-size: 11px; font-weight: 700; letter-spacing: .18em;
+  padding: 3px 10px; border: 1px solid; border-radius: 999px;
+  background: rgba(255,255,255,0.02);
+}
+
+.studio-headline {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-weight: 900; font-size: 56px; line-height: 1.05;
+  margin: 0 0 16px; color: var(--ink); letter-spacing: -0.01em;
+}
+
+.studio-deck {
+  font-family: 'Inter', sans-serif;
+  font-size: 15px; line-height: 1.6; color: var(--muted);
+  margin: 0; max-width: 720px;
+}
+
+.studio-rule {
+  height: 1px; background: var(--rule);
+  margin-top: 22px; margin-bottom: 0;
+}
+
+/* ---- Metric grid ---- */
+.studio-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0; margin-top: 24px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+.studio-metric {
+  padding: 22px 18px; border-right: 1px solid var(--rule);
+}
+.studio-metric:last-child { border-right: none; }
+.studio-metric-label {
+  font-family: 'Inter', sans-serif;
+  font-size: 10px; font-weight: 600; letter-spacing: .25em;
+  color: var(--muted); margin-bottom: 8px;
+}
+.studio-metric-value {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 32px; font-weight: 700; color: var(--gold);
+  line-height: 1.1;
+}
+
+/* ---- Pull quote ---- */
+.studio-pull {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-style: italic; font-size: 22px; line-height: 1.4;
+  color: var(--ink); border-left: 3px solid var(--gold);
+  padding: 8px 0 8px 18px; margin: 24px 0 0;
+}
+
+/* ---- Footer / byline ---- */
+.studio-footer {
+  margin-top: 28px; padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+}
+.studio-byline {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px; letter-spacing: .2em; text-transform: uppercase;
+  color: var(--muted);
+}
+.studio-byline-sep { color: var(--rule); }
+
+/* ---- Cover layout ---- */
+.studio-cover-grid {
+  display: grid; grid-template-columns: 2fr 1fr; gap: 28px;
+  margin-top: 8px;
+}
+.studio-cover-plot { min-height: 360px; }
+.studio-cover-side { display: flex; flex-direction: column; gap: 18px; }
+@media (max-width: 900px) {
+  .studio-cover-grid { grid-template-columns: 1fr; }
+  .studio-headline   { font-size: 40px; }
+}
+
+/* ---- Spread layout ---- */
+.studio-spread .studio-headline { font-size: 64px; }
+.studio-spread .studio-metric-grid { margin-top: 32px; }
+
+/* ---- Minimal layout ---- */
+.studio-minimal { padding: 56px 32px; }
+.studio-min-title {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px; letter-spacing: .35em; text-transform: uppercase;
+  color: var(--gold); margin: 0 0 16px;
+}
+
+/* ---- Buttons ---- */
+.studio-toolbar .btn-outline-warning {
+  border-color: var(--gold); color: var(--gold);
+}
+.studio-toolbar .btn-outline-warning:hover {
+  background: var(--gold); color: #0d0d0f;
+}
