@@ -36,10 +36,12 @@ source("R/db.R", local = TRUE)
 source("R/utils.R", local = TRUE)
 source("R/model_registry.R", local = TRUE)
 source("R/python_bridge.R", local = TRUE)
+source("R/ai_analysis.R", local = TRUE)
 source("R/mod_ingest.R", local = TRUE)
 source("R/mod_explore.R", local = TRUE)
 source("R/mod_modellab.R", local = TRUE)
 source("R/mod_predict.R", local = TRUE)
+source("R/mod_dashboard.R", local = TRUE)
 source("R/mod_runs.R", local = TRUE)
 
 # ---- Initialize DB on startup ----------------------------------------
@@ -47,6 +49,7 @@ db_init()
 
 # ---- UI ---------------------------------------------------------------
 ui <- page_navbar(
+  id = "main_nav",
   title = tagList(
     icon("flask"),
     span("Shiny ML & Forecasting Lab", style = "font-weight:600;")
@@ -94,7 +97,12 @@ ui <- page_navbar(
     predict_ui("predict")
   ),
   nav_panel(
-    "5 · Runs & Compare",
+    "5 · Results Dashboard",
+    icon = icon("gauge-high"),
+    dashboard_ui("dashboard")
+  ),
+  nav_panel(
+    "6 · Runs & Compare",
     icon = icon("trophy"),
     runs_ui("runs")
   ),
@@ -137,7 +145,13 @@ server <- function(input, output, session) {
   explore_server("explore", state)
   modellab_server("modellab", state)
   predict_server("predict", state)
+  dashboard_server("dashboard", state)
   runs_server("runs", state)
+
+  # Auto-jump to Results Dashboard whenever a new run finishes
+  observeEvent(state$last_run_id, {
+    nav_select("main_nav", "5 · Results Dashboard")
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
 }
 
 shinyApp(ui, server)

@@ -5,18 +5,25 @@
 
 runs_ui <- function(id) {
   ns <- NS(id)
-  card(
-    card_header(
-      div(style = "display:flex; justify-content:space-between; align-items:center;",
-          "Run leaderboard",
-          actionButton(ns("refresh"), "Refresh", icon = icon("rotate"),
-                       class = "btn-sm btn-outline-light"))
+  navset_card_underline(
+    title = div(style = "display:flex; justify-content:space-between; align-items:center;",
+                "Runs",
+                actionButton(ns("refresh"), "Refresh", icon = icon("rotate"),
+                             class = "btn-sm btn-outline-light")),
+    nav_panel("Leaderboard",
+      icon = icon("trophy"),
+      DT::DTOutput(ns("table")),
+      hr(),
+      h6("Run details"),
+      verbatimTextOutput(ns("detail")),
+      plotlyOutput(ns("detail_plot"), height = "400px")
     ),
-    DT::DTOutput(ns("table")),
-    hr(),
-    h6("Run details"),
-    verbatimTextOutput(ns("detail")),
-    plotlyOutput(ns("detail_plot"), height = "400px")
+    nav_panel("Stats Explorer",
+      icon = icon("magnifying-glass"),
+      tags$p(class = "text-muted",
+             "Every metric, hyperparameter, and diagnostic across every run — fully searchable. Use the column filters to drill down (e.g. find every xgboost run with eta=0.05)."),
+      DT::DTOutput(ns("stats_table"))
+    )
   )
 }
 
@@ -24,12 +31,34 @@ runs_server <- function(id, state) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
-    runs_data <- reactiveVal(db_get_runs())
+    runs_data  <- reactiveVal(db_get_runs())
+    stats_data <- reactiveVal(db_flatten_stats())
 
-    observeEvent(input$refresh, runs_data(db_get_runs()))
-    # Refresh whenever a new run is saved
-    observeEvent(state$last_run_id, runs_data(db_get_runs()),
-                 ignoreNULL = TRUE)
+    refresh_all <- function() {
+      runs_data(db_get_runs())
+      stats_data(db_flatten_stats())
+    }
+
+    observeEvent(input$refresh, refresh_all())
+    observeEvent(state$last_run_id, refresh_all(), ignoreNULL = TRUE)
+
+    # ---- Stats explorer (searchable) ---------------------------------
+    output$stats_table <- DT::renderDT({
+      d <- stats_data()
+      if (nrow(d) == 0)
+        return(DT::datatable(data.frame(message = "No runs yet — train a model first.")))
+      DT::datatable(
+        d,
+        filter = "top",
+        extensions = c("Buttons"),
+        options = list(pageLength = 25, scrollX = TRUE,
+                       dom = "Bfrtip",
+                       buttons = c("copy","csv","excel"),
+                       searchHighlight = TRUE,
+                       order = list(list(0, "desc"))),
+        rownames = FALSE, class = "compact stripe"
+      )
+    })
 
     output$table <- DT::renderDT({
       d <- runs_data()

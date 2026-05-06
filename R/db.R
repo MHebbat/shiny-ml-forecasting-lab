@@ -54,6 +54,75 @@ db_init <- function() {
       upper REAL,
       ts TEXT
     )")
+
+  DBI::dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS analyses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER UNIQUE,
+      provider TEXT,
+      verdict TEXT,
+      grade TEXT,
+      analysis_md TEXT,
+      suggestions_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )")
+}
+
+# ---- Analyses --------------------------------------------------------
+db_save_analysis <- function(run_id, provider, verdict, grade,
+                              analysis_md, suggestions = list()) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con,
+    "INSERT OR REPLACE INTO analyses(run_id,provider,verdict,grade,analysis_md,suggestions_json)
+     VALUES(?,?,?,?,?,?)",
+    params = list(run_id, provider, verdict, grade, analysis_md,
+                  jsonlite::toJSON(suggestions, auto_unbox = TRUE)))
+}
+
+db_get_analysis <- function(run_id) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  res <- DBI::dbGetQuery(con,
+    "SELECT * FROM analyses WHERE run_id = ?", params = list(run_id))
+  if (nrow(res) == 0) NULL else as.list(res[1, ])
+}
+
+# ---- Flattened searchable stats --------------------------------------
+# Returns one row per (run, key, value) for both metrics and hyperparameters.
+db_flatten_stats <- function() {
+  runs <- db_get_runs()
+  if (nrow(runs) == 0) return(data.frame())
+  rows <- list()
+  for (i in seq_len(nrow(runs))) {
+    r <- runs[i, ]
+    metrics <- tryCatch(jsonlite::fromJSON(r$metrics_json), error = function(e) list())
+    params  <- tryCatch(jsonlite::fromJSON(r$params_json),  error = function(e) list())
+    if (length(metrics) > 0) {
+      for (nm in names(metrics)) {
+        v <- metrics[[nm]]
+        rows[[length(rows)+1]] <- data.frame(
+          run_id = r$id, created_at = r$created_at,
+          dataset = r$dataset %||% NA_character_,
+          model = r$model_id, task = r$task_type,
+          kind = "metric", key = nm, value = as.character(v),
+          numeric_value = suppressWarnings(as.numeric(v)),
+          stringsAsFactors = FALSE)
+      }
+    }
+    if (length(params) > 0) {
+      for (nm in names(params)) {
+        v <- params[[nm]]
+        rows[[length(rows)+1]] <- data.frame(
+          run_id = r$id, created_at = r$created_at,
+          dataset = r$dataset %||% NA_character_,
+          model = r$model_id, task = r$task_type,
+          kind = "param", key = nm, value = as.character(v),
+          numeric_value = suppressWarnings(as.numeric(v)),
+          stringsAsFactors = FALSE)
+      }
+    }
+  }
+  if (length(rows) == 0) return(data.frame())
+  do.call(rbind, rows)
 }
 
 db_save_dataset <- function(name, df, meta) {

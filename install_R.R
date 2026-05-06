@@ -19,7 +19,9 @@ needed <- c(
   # Tidymodels (optional but nice for tuning workflows)
   "recipes", "parsnip", "tune", "rsample", "yardstick", "workflows",
   # Python bridge
-  "reticulate"
+  "reticulate",
+  # HTTP client for AI providers
+  "httr2"
 )
 
 # Optional / heavy — uncomment to install

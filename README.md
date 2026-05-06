@@ -19,7 +19,7 @@ R is the primary language. **Python (via [`reticulate`](https://rstudio.github.i
 - **Frequency-aware**: declare daily / weekly / monthly / quarterly / yearly
 - **Auto task detection**: regression · binary / multiclass classification · count · proportion · time series
 - **Recipe builder**: missingness handling, one-hot encoding, scaling, lag features, rolling means
-- **Model registry** (extend in `R/model_registry.R`):
+- **Model registry** (extend in `R/model_registry.R`) — each model has a built-in description shown in the UI:
   - Regression — `lm`, `glmnet` (Lasso/Ridge/Elastic Net), `mgcv::gam`, `ranger`, `xgboost`, **LightGBM** (Py), **CatBoost** (Py), **Keras MLP** (Py)
   - Classification — `glm` logit, penalized logit (`glmnet`), `ranger`, `xgboost`, LightGBM, Keras MLP
   - Counts / proportions — Poisson GLM, Negative Binomial GLM, Beta regression
@@ -27,9 +27,26 @@ R is the primary language. **Python (via [`reticulate`](https://rstudio.github.i
 - **Per-model tuning UI** generated from the registry's parameter spec — sliders, numeric inputs, toggles, and selects
 - **Validation modes**: holdout split · K-fold CV · rolling-origin CV (time series)
 - **Forecast horizon** configurable per run (steps mapped to your declared frequency)
-- **Persistence**: every run, hyperparameter set, and prediction is stored in `db/app.sqlite`
+- **🔥 Results Dashboard** auto-opens after every run — KPI tiles, fit plot, full residual diagnostics (residuals-vs-fitted, histogram, Q-Q, ACF), searchable per-row prediction table, and a flat searchable stat-cards view for every metric, hyperparameter, and diagnostic.
+- **🤖 AI Verdict** — one click sends the run to OpenAI, Anthropic, or Perplexity for an objective, blunt assessment (PASS / WEAK / FAIL grade, residual critique, concrete next-step suggestions). Falls back to a deterministic heuristic verdict if no API key is set so the feature always works.
+- **Searchable Stats Explorer** — every metric / hyperparameter / diagnostic across every run, flattened into one DataTable with global + per-column search and CSV / Excel export. Find every `xgboost` run with `eta=0.05` in one filter.
+- **Persistence**: every run, hyperparameter set, prediction, and AI analysis is stored in `db/app.sqlite`
 - **Leaderboard**: compare runs across datasets / models / metrics
 - **Dark theme** (`bslib` darkly + custom CSS)
+
+## AI configuration
+
+The AI Verdict feature uses environment variables to find provider keys. Set any one of them before launching `shiny::runApp()`:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+# or
+export ANTHROPIC_API_KEY="sk-ant-..."
+# or
+export PPLX_API_KEY="pplx-..."
+```
+
+With no keys set, the dashboard's AI tab still works — it returns a rule-based verdict using R², residual bias, heteroscedasticity, ACF lag-1, and class-balance heuristics.
 
 ## Quick start
 

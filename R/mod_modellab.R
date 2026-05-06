@@ -213,7 +213,10 @@ modellab_server <- function(id, state) {
 
       duration <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
       req(out)
+      out$model_id <- m$id
       state$last_model <- out
+      state$last_params <- params
+      state$n_train <- nrow(train_df)
       add_log(sprintf("Done in %.2fs · %s", duration, fmt_metrics(out$metrics)))
 
       # Save run + predictions
