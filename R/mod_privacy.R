@@ -304,7 +304,7 @@ privacy_server <- function(id, state) {
                else if (nrow(d) == 0) "-"
                else "PASS"
       grade_col <- switch(grade, "PASS"="#3fb950","WEAK"="#d4af37","FAIL"="#d9534f","#8b949e")
-      div(class = "studio-shell", style = "padding:12px 0 0;",
+      div(class = "studio-intro", style = "margin-top:12px;",
         div(class = "studio-page",
           div(class = "studio-hero",
             div(class = "studio-hero-meta",

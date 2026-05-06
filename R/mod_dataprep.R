@@ -7,8 +7,8 @@
 dataprep_ui <- function(id) {
   ns <- NS(id)
   tagList(
-    # Premium hero card
-    tags$div(class = "studio-shell", style = "padding:0 0 18px;",
+    # Premium hero card (compact intro variant — does NOT take full viewport)
+    tags$div(class = "studio-intro",
       tags$div(class = "studio-page",
         tags$div(class = "studio-hero",
           tags$div(class = "studio-hero-meta",
@@ -145,7 +145,7 @@ dataprep_server <- function(id, state, parent_session = NULL) {
       n_ok   <- sum(p$severity == "OK")
       grade <- if (n_crit > 0) "FAIL" else if (n_warn > n_ok) "WEAK" else "PASS"
       grade_col <- switch(grade, "PASS"="#3fb950","WEAK"="#d4af37","FAIL"="#d9534f")
-      div(class = "studio-shell", style = "padding:12px 0 0;",
+      div(class = "studio-intro", style = "margin-top:12px;",
         div(class = "studio-page",
           div(class = "studio-hero",
             div(class = "studio-hero-meta",

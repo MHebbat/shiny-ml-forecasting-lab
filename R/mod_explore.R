@@ -92,8 +92,8 @@ explore_correlation <- function(df, method = c("pearson", "spearman", "kendall")
 explore_ui <- function(id) {
   ns <- NS(id)
   tagList(
-    # Premium hero card
-    tags$div(class = "studio-shell", style = "padding:0 0 18px;",
+    # Premium hero card (compact intro variant — does NOT take full viewport)
+    tags$div(class = "studio-intro",
       tags$div(class = "studio-page",
         tags$div(class = "studio-hero",
           tags$div(class = "studio-hero-meta",

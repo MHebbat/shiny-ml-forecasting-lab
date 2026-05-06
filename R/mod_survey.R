@@ -235,7 +235,7 @@ survey_server <- function(id, state) {
       req(state$raw_data)
       d <- design_state()
       grade_col <- if (d$kind == "weighted") "#3fb950" else "#8b949e"
-      div(class = "studio-shell", style = "padding:12px 0 0;",
+      div(class = "studio-intro", style = "margin-top:12px;",
         div(class = "studio-page",
           div(class = "studio-hero",
             div(class = "studio-hero-meta",

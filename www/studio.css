@@ -164,3 +164,48 @@
 .studio-toolbar .btn-outline-warning:hover {
   background: var(--gold); color: #0d0d0f;
 }
+
+/* ---- Compact hero (for tab intro cards above normal Shiny content) ----
+   Same magazine styling as .studio-shell but does NOT claim 100vh, so the
+   rest of the tab body still renders below it.
+   ---------------------------------------------------------------------- */
+.studio-intro {
+  --paper:  #0d0d0f;
+  --ink:    #f5f3ee;
+  --muted:  #8a8a8a;
+  --rule:   #2a2a2a;
+  --gold:   #d4af37;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 0;
+  margin-bottom: 18px;
+}
+.studio-intro .studio-page {
+  background: var(--paper);
+  padding: 24px 22px 22px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  position: relative;
+}
+.studio-intro .studio-page::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--gold) 0%, transparent 100%);
+}
+.studio-intro .studio-hero { margin-bottom: 0; }
+.studio-intro .studio-headline { font-size: 36px; line-height: 1.08; margin: 0 0 12px; color: var(--ink); font-family: 'Playfair Display', Georgia, serif; font-weight: 900; letter-spacing: -0.01em; }
+.studio-intro .studio-deck { font-size: 14px; line-height: 1.55; color: var(--muted); margin: 0; max-width: 820px; font-family: 'Inter', sans-serif; }
+.studio-intro .studio-hero-meta {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+}
+.studio-intro .studio-kicker {
+  font-size: 11px; font-weight: 600; letter-spacing: .22em;
+  color: var(--muted); text-transform: uppercase;
+}
+.studio-intro .studio-dot { color: var(--rule); }
+.studio-intro .studio-rule {
+  height: 1px; background: var(--rule); margin-top: 14px;
+}
+@media (max-width: 900px) {
+  .studio-intro .studio-headline { font-size: 28px; }
+}
