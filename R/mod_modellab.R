@@ -25,7 +25,8 @@ modellab_ui <- function(id) {
             tags$span(class = "studio-kicker", "TRAINING STUDIO")
           ),
           tags$h1(class = "studio-headline",
-                  "Model Estimation."),
+                  tagList("Model Estimation.",
+                            doc_chip("modellab", "Model Lab"))),
           tags$p(class = "studio-deck",
             "Specification, hyperparameter configuration, validation strategy, ",
             "and reproducibility controls for every model in the registry. ",
@@ -34,7 +35,19 @@ modellab_ui <- function(id) {
             " card, and a deep-dive documentation drawer. Hyperparameters ",
             "are grouped by role; the resolved JSON is shown before training."
           ),
-          tags$div(class = "studio-rule")
+          tags$div(class = "studio-rule"),
+          tags$div(style = "margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;",
+            actionButton(ns("save_project"), "Save Project",
+                          class = "btn-outline-warning btn-sm",
+                          icon = icon("floppy-disk")),
+            downloadButton(ns("export_brief_html"), "Brief Report (HTML)",
+                            class = "btn-outline-info btn-sm"),
+            downloadButton(ns("export_brief_pdf"), "Brief Report (PDF)",
+                            class = "btn-outline-info btn-sm"),
+            actionButton(ns("show_manifest"), "Show Manifest",
+                          class = "btn-outline-secondary btn-sm",
+                          icon = icon("file-code"))
+          )
         )
       )
     ),
@@ -828,6 +841,30 @@ modellab_server <- function(id, state) {
 
       add_log("Training ", m$label, " (", m$engine, ")")
 
+      # ---- Survey sample weights (from Survey -> Model Lab bridge) ----
+      # If state$meta$sample_weights names a column in the prepped frame,
+      # pass it via params$weights to fitters that support it. Models that
+      # don't natively support weights will surface a notice in the log.
+      sw_col <- state$meta$sample_weights
+      sw_supported <- c("lm_reg","glm_logit","glmnet_reg","glmnet_cls",
+                         "gam_reg","ranger_reg","ranger_cls","xgb_reg","xgb_cls",
+                         "poisson_glm","negbin_glm","betareg",
+                         "survreg")
+      if (!is.null(sw_col) && !is.na(sw_col) && nzchar(sw_col) &&
+          sw_col %in% names(df)) {
+        w_vec <- suppressWarnings(as.numeric(df[[sw_col]]))
+        if (any(is.finite(w_vec) & w_vec > 0)) {
+          params$weights <- w_vec
+          if (input$model_id %in% sw_supported) {
+            add_log(sprintf("Applied survey sample weights from `%s`", sw_col))
+          } else {
+            add_log(sprintf(
+              "Survey sample weights `%s` available but ignored by this model",
+              sw_col))
+          }
+        }
+      }
+
       # Class weighting (best-effort: pass weights via params for fitters
       # that accept a 'weights' element).
       if (identical(tcfg$class_weighting, "inverse") &&
@@ -836,7 +873,7 @@ modellab_server <- function(id, state) {
         tab <- table(y)
         w_per_class <- 1 / as.numeric(tab); names(w_per_class) <- names(tab)
         params$weights <- as.numeric(w_per_class[as.character(y)])
-        add_log("Applied inverse-frequency class weights")
+        add_log("Applied inverse-frequency class weights (overrides survey weights for this run)")
       } else if (identical(tcfg$class_weighting, "smote") &&
                  task %in% c("binary_classification","multiclass_classification")) {
         if (requireNamespace("themis", quietly = TRUE)) {
@@ -849,19 +886,36 @@ modellab_server <- function(id, state) {
       # Prepare modelling frame: drop time column from features
       mdf <- df
       if (!is.null(tcol)) mdf[[tcol]] <- NULL
+      # If a sample-weights column was passed, drop it from predictors so
+      # it doesn't double as a feature. params$weights still carries the
+      # numeric vector aligned with mdf rows.
+      if (!is.null(sw_col) && !is.na(sw_col) && nzchar(sw_col) &&
+          sw_col %in% names(mdf) && sw_col != target) {
+        mdf[[sw_col]] <- NULL
+      }
+      # Also drop replicate-weight columns from predictors when present.
+      rep_w <- state$meta$replicate_weights
+      if (!is.null(rep_w) && length(rep_w) > 0) {
+        rep_w_in <- intersect(rep_w, names(mdf))
+        if (length(rep_w_in) > 0) mdf[, rep_w_in] <- NULL
+      }
 
       # Decide split scheme
       n <- nrow(mdf)
       pct <- pmin(pmax(tcfg$holdout_pct / 100, 0.5), 0.95)
       if (task == "time_series") {
         cut <- floor(n * pct)
-        train_df <- mdf[seq_len(cut), , drop = FALSE]
-        test_df  <- mdf[-seq_len(cut), , drop = FALSE]
+        train_idx <- seq_len(cut)
+        test_idx  <- setdiff(seq_len(n), train_idx)
       } else {
-        idx <- sample(seq_len(n), size = floor(n * pct))
-        train_df <- mdf[idx, , drop = FALSE]
-        test_df  <- mdf[-idx, , drop = FALSE]
+        train_idx <- sample(seq_len(n), size = floor(n * pct))
+        test_idx  <- setdiff(seq_len(n), train_idx)
       }
+      train_df <- mdf[train_idx, , drop = FALSE]
+      test_df  <- mdf[test_idx, , drop = FALSE]
+      # Align weights with the training rows
+      if (!is.null(params$weights) && length(params$weights) == n)
+        params$weights <- params$weights[train_idx]
 
       # Compute budget cap
       budget_secs <- as.numeric(tcfg$compute_budget_min) * 60
@@ -1056,6 +1110,64 @@ modellab_server <- function(id, state) {
 
     output$log_box <- renderText({
       paste(log_msgs(), collapse = "\n")
+    })
+
+    # ---- Save project ----------------------------------------------
+    observeEvent(input$save_project, {
+      bundle <- tryCatch(project_save(state),
+                          error = function(e) {
+                            flash(paste("Save failed:",
+                                          conditionMessage(e)), "error"); NULL })
+      if (!is.null(bundle))
+        flash(sprintf("Project saved to %s", bundle), "message")
+    })
+
+    # ---- Brief report ---------------------------------------------
+    output$export_brief_html <- downloadHandler(
+      filename = function()
+        sprintf("brief_report_run%s_%s.html",
+                state$last_run_id %||% "0",
+                format(Sys.time(), "%Y%m%d_%H%M%S")),
+      content = function(file) {
+        r <- tryCatch(render_brief_report(state, format = "html",
+                                            file_path = file,
+                                            theme = state$chrome_theme %||% "bundesbank"),
+                       error = function(e) NULL)
+        if (is.null(r) || !file.exists(file))
+          writeLines("<p>Report failed.</p>", file)
+      }
+    )
+    output$export_brief_pdf <- downloadHandler(
+      filename = function()
+        sprintf("brief_report_run%s_%s.pdf",
+                state$last_run_id %||% "0",
+                format(Sys.time(), "%Y%m%d_%H%M%S")),
+      content = function(file) {
+        r <- tryCatch(render_brief_report(state, format = "pdf",
+                                            file_path = file,
+                                            theme = state$chrome_theme %||% "bundesbank"),
+                       error = function(e) NULL)
+        if (is.null(r) || !file.exists(file)) {
+          tryCatch(render_brief_report(state, format = "html",
+                                         file_path = file,
+                                         theme = state$chrome_theme %||% "bundesbank"),
+                    error = function(e) writeLines("Report failed.", file))
+        }
+      }
+    )
+
+    # ---- Manifest modal -------------------------------------------
+    observeEvent(input$show_manifest, {
+      m <- tryCatch(make_manifest(state), error = function(e) list(error = conditionMessage(e)))
+      txt <- jsonlite::toJSON(m, auto_unbox = TRUE, pretty = TRUE,
+                                na = "null", null = "null")
+      showModal(modalDialog(
+        title = "Reproducibility Manifest",
+        size = "l", easyClose = TRUE,
+        tags$pre(style = "max-height:60vh;overflow:auto;",
+                  as.character(txt)),
+        footer = tagList(modalButton("Close"))
+      ))
     })
   })
 }

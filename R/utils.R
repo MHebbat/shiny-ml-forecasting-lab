@@ -4,6 +4,71 @@
 
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) y else x
 
+# ---- Robust date / datetime parsing ---------------------------------
+# safe_as_date / safe_as_posix wrap base parsers in tryCatch and fall
+# back to lubridate::parse_date_time with a battery of common orders.
+# Returns vector of NA if every strategy fails (never throws).
+# `column_name` is purely for error messaging surfaced via .date_warn().
+.date_orders <- c("Ymd", "dmY", "mdY", "Y-m-d", "d-m-Y", "m/d/Y", "d/m/Y",
+                  "Ymd HMS", "Ymd HM", "dmY HMS", "dmY HM",
+                  "mdY HMS", "mdY HM", "Y-m-d H:M:S", "d-m-Y H:M:S")
+
+.flag_date_warning <- function(column_name, sample) {
+  msg <- sprintf(
+    "Could not parse '%s' as a date — %s. Declare its format in Data Prep -> parse_datetime.",
+    column_name, paste(utils::head(sample, 3), collapse = "; "))
+  message("[date-parse] ", msg)
+  msg
+}
+
+safe_as_date <- function(x, format = NULL, column_name = "(unknown)") {
+  if (inherits(x, "Date")) return(x)
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+  s <- as.character(x)
+  out <- tryCatch({
+    if (!is.null(format) && nzchar(format)) as.Date(s, format = format)
+    else suppressWarnings(as.Date(s))
+  }, error = function(e) rep(NA, length(s)))
+  if (any(!is.na(s) & is.na(out))) {
+    if (requireNamespace("lubridate", quietly = TRUE)) {
+      lub <- tryCatch(
+        suppressWarnings(lubridate::parse_date_time(s, orders = .date_orders, quiet = TRUE)),
+        error = function(e) rep(NA, length(s)))
+      idx <- !is.na(s) & is.na(out) & !is.na(lub)
+      if (any(idx)) out[idx] <- as.Date(lub[idx])
+    }
+    if (any(!is.na(s) & is.na(out))) {
+      bad <- s[!is.na(s) & is.na(out)]
+      .flag_date_warning(column_name, unique(bad))
+    }
+  }
+  out
+}
+
+safe_as_posix <- function(x, format = NULL, tz = "UTC", column_name = "(unknown)") {
+  if (inherits(x, "POSIXt")) return(x)
+  s <- as.character(x)
+  out <- tryCatch({
+    if (!is.null(format) && nzchar(format)) as.POSIXct(s, format = format, tz = tz)
+    else suppressWarnings(as.POSIXct(s, tz = tz))
+  }, error = function(e) rep(as.POSIXct(NA), length(s)))
+  if (any(!is.na(s) & is.na(out))) {
+    if (requireNamespace("lubridate", quietly = TRUE)) {
+      lub <- tryCatch(
+        suppressWarnings(lubridate::parse_date_time(s, orders = .date_orders,
+                                                    tz = tz, quiet = TRUE)),
+        error = function(e) rep(as.POSIXct(NA, tz = tz), length(s)))
+      idx <- !is.na(s) & is.na(out) & !is.na(lub)
+      if (any(idx)) out[idx] <- as.POSIXct(lub[idx], tz = tz)
+    }
+    if (any(!is.na(s) & is.na(out))) {
+      bad <- s[!is.na(s) & is.na(out)]
+      .flag_date_warning(column_name, unique(bad))
+    }
+  }
+  out
+}
+
 # ---- Task auto-detection ---------------------------------------------
 detect_task_type <- function(y, time_col_present = FALSE) {
   if (time_col_present) return("time_series")

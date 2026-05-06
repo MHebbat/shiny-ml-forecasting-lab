@@ -31,6 +31,17 @@ suppressPackageStartupMessages({
   library(plotly)
 })
 
+# ---- Upload size cap --------------------------------------------------
+# Default: 5 GB. Override with env var SHINYML_MAX_UPLOAD_GB (numeric).
+local({
+  gb_env <- Sys.getenv("SHINYML_MAX_UPLOAD_GB", unset = "")
+  gb <- if (nzchar(gb_env)) suppressWarnings(as.numeric(gb_env)) else 5
+  if (!is.finite(gb) || gb <= 0) gb <- 5
+  options(shiny.maxRequestSize = as.numeric(gb) * 1024^3)
+  message(sprintf("[shinyml] Upload limit: %.1f GB (set SHINYML_MAX_UPLOAD_GB to change)",
+                  gb))
+})
+
 # ---- Source modules ---------------------------------------------------
 source("R/db.R", local = TRUE)
 source("R/utils.R", local = TRUE)
@@ -39,6 +50,11 @@ source("R/recipe_builder.R", local = TRUE)
 source("R/model_registry.R", local = TRUE)
 source("R/python_bridge.R", local = TRUE)
 source("R/ai_analysis.R", local = TRUE)
+source("R/manifest.R", local = TRUE)
+source("R/io_project.R", local = TRUE)
+source("R/report_render.R", local = TRUE)
+source("R/docs_content.R", local = TRUE)
+source("R/mod_docs.R", local = TRUE)
 source("R/mod_ingest.R", local = TRUE)
 source("R/mod_explore.R", local = TRUE)
 source("R/mod_dataprep.R", local = TRUE)
@@ -60,25 +76,41 @@ ui <- page_navbar(
     icon("flask"),
     span("Shiny ML & Forecasting Lab", style = "font-weight:600;")
   ),
+  # Default chrome: Bundesbank Light. The user can switch to dark
+  # ("Editorial Dark") or "Light Minimal" via the navbar picker.
   theme = bs_theme(
     version = 5,
-    bootswatch = "darkly",
-    primary = "#3fb950",
+    primary = "#003D7C",
     base_font = font_google("Inter"),
-    heading_font = font_google("Inter")
+    heading_font = font_google("Source Serif 4"),
+    bg = "#FAFAF7",
+    fg = "#1A1A1A"
   ),
   fillable = TRUE,
-  bg = "#0d1117",
+  bg = "#FAFAF7",
 
   header = tags$head(
+    # Set the initial chrome class on <body>. The picker re-applies it
+    # client-side without a reload.
+    tags$script(HTML(
+"document.addEventListener('DOMContentLoaded', function(){
+  document.body.classList.add('chrome-bundesbank');
+});
+if (window.Shiny) {
+  Shiny.addCustomMessageHandler('shinyml_set_chrome', function(m){
+    var b = document.body;
+    b.classList.remove('chrome-bundesbank','chrome-dark','chrome-light');
+    if (m && m.cls) b.classList.add(m.cls);
+  });
+}"
+    )),
     tags$link(rel = "stylesheet", href = "custom.css"),
     tags$link(rel = "stylesheet", href = "studio.css"),
+    tags$link(rel = "stylesheet", href = "bundesbank.css"),
     tags$link(rel = "stylesheet",
-              href = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;900&family=Inter:wght@300;400;500;600;700&display=swap"),
+              href = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;900&family=Source+Serif+4:wght@400;600;700&family=Inter:wght@300;400;500;600;700&display=swap"),
     tags$style(HTML("
       .nav-link.active { font-weight:600 !important; }
-      .card { border: 1px solid #30363d; }
-      .card-header { background: #161b22; font-weight:600; }
       .badge-py { background:#3776ab; color:#fff; }
       .badge-r  { background:#276dc3; color:#fff; }
       pre, code { font-size: 0.85em; }
@@ -137,19 +169,40 @@ ui <- page_navbar(
   ),
   nav_spacer(),
   nav_item(
+    tags$div(class = "chrome-picker",
+      tags$span(class = "studio-kicker",
+                style = "font-size:0.7em;", "CHROME"),
+      selectInput("global_chrome_theme", NULL,
+                   choices = c("Bundesbank Light" = "bundesbank",
+                                "Editorial Dark"   = "dark",
+                                "Light Minimal"    = "light"),
+                   selected = "bundesbank",
+                   width = "160px")
+    )
+  ),
+  nav_item(
     tags$div(style = "display:flex; align-items:center; gap:6px; margin-right:8px;",
       tags$span(class = "studio-kicker",
-                style = "font-size:0.7em; color:#8b949e;", "PLOT THEME"),
+                style = "font-size:0.7em;", "PLOT THEME"),
       selectInput("global_plot_theme", NULL,
-                   choices = c("Studio (dark)" = "studio",
-                                "Light minimal" = "light",
-                                "Bundesbank" = "bundesbank"),
-                   selected = "studio",
+                   choices = c("Bundesbank" = "bundesbank",
+                                "Studio (dark)" = "studio",
+                                "Light minimal" = "light"),
+                   selected = "bundesbank",
                    width = "150px"),
       tags$div(id = "plot_theme_swatch",
-               style = "width:60px; height:18px; border:1px solid #30363d;",
+               style = "width:60px; height:18px; border:1px solid #D9D9D9;",
                plotly::plotlyOutput("plot_theme_preview",
                                       width = "60px", height = "18px"))
+    )
+  ),
+  nav_item(
+    tags$div(style = "display:flex; align-items:center; gap:6px; margin-right:8px;",
+      tags$span(class = "studio-kicker",
+                style = "font-size:0.7em;", "PROJECT"),
+      uiOutput("project_picker_ui", inline = TRUE),
+      actionButton("project_load_btn", "Load",
+                    class = "btn-outline-primary btn-sm")
     )
   ),
   nav_item(
@@ -192,7 +245,8 @@ server <- function(input, output, session) {
     privacy_allow_ai = TRUE,   # AI egress gate
     prep_log        = list(),  # applied prep steps
     survey_design   = NULL,    # declared survey design
-    plot_theme      = "studio" # active plot theme: studio | light | bundesbank
+    plot_theme      = "bundesbank", # active plot theme: bundesbank | studio | light
+    chrome_theme    = "bundesbank"  # active chrome: bundesbank | dark | light
   )
 
   # Show python availability status in navbar
@@ -202,17 +256,54 @@ server <- function(input, output, session) {
 
   # ---- Plot theme: keep state$plot_theme in sync + render preview ----
   observe({
-    state$plot_theme <- input$global_plot_theme %||% "studio"
+    state$plot_theme <- input$global_plot_theme %||% "bundesbank"
   })
   output$plot_theme_preview <- plotly::renderPlotly({
-    plot_theme_preview(input$global_plot_theme %||% "studio")
+    plot_theme_preview(input$global_plot_theme %||% "bundesbank")
+  })
+
+  # ---- Chrome theme: toggle a class on <body> via JS, persist in state
+  observe({
+    th <- input$global_chrome_theme %||% "bundesbank"
+    state$chrome_theme <- th
+    session$sendCustomMessage("shinyml_set_chrome",
+      list(cls = paste0("chrome-", th)))
+  })
+
+  # ---- Project picker UI ---------------------------------------------
+  output$project_picker_ui <- renderUI({
+    df <- tryCatch(project_list(), error = function(e) data.frame())
+    if (is.null(df) || nrow(df) == 0) {
+      return(tags$span(class = "text-muted",
+                        style = "font-size:0.85em;",
+                        "(none saved)"))
+    }
+    selectInput("project_pick", NULL,
+                 choices = setNames(df$path,
+                                     sprintf("%s · %s",
+                                              df$name, df$saved_at)),
+                 width = "180px")
+  })
+
+  observeEvent(input$project_load_btn, {
+    p <- input$project_pick
+    if (is.null(p) || !nzchar(p)) {
+      flash("No saved project to load.", "warning"); return()
+    }
+    res <- tryCatch(project_load(state, p),
+                    error = function(e) {
+                      flash(paste("Load failed:",
+                                    conditionMessage(e)), "error"); NULL })
+    req(res)
+    flash(sprintf("Loaded project '%s'.", res$name %||% basename(p)),
+          "message")
   })
 
   ingest_server("ingest", state)
   explore_server("explore", state, parent_session = session)
   dataprep_server("dataprep", state, parent_session = session)
   privacy_server("privacy", state)
-  survey_server("survey", state)
+  survey_server("survey", state, parent_session = session)
   modellab_server("modellab", state)
   predict_server("predict", state)
   dashboard_server("dashboard", state)

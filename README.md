@@ -10,32 +10,92 @@ R is the primary language. **Python (via [`reticulate`](https://rstudio.github.i
 Ingest → Explore → Data Prep → Privacy Audit → Survey & Panel → Model Lab → Predict → Dashboard → Editorial Studio → Runs
 ```
 
-## Quick start (Mac · Windows · Linux — identical experience)
+## Easy install
+
+One command. R packages + Python TF/Keras venv + parse check, all idempotent.
 
 ```bash
 git clone https://github.com/MHebbat/shiny-ml-forecasting-lab.git
 cd shiny-ml-forecasting-lab
-
-# macOS / Linux
-./run.sh
-
-# Windows
-run.bat
-
-# Or with make
-make install && make run
-```
-
-The launcher checks for `Rscript`, installs missing R packages (idempotent), and opens the app at `http://127.0.0.1:4848`. Full instructions in [`SETUP.md`](SETUP.md).
-
-For a fresh install with one command (R packages + Python TF/Keras venv + parse check), use:
-
-```bash
 Rscript setup.R              # full install
 Rscript setup.R --dry-run    # preview, no changes
 ```
 
-Wrappers are also provided as `./setup.sh` (macOS/Linux) and `.\setup.ps1` (Windows).
+Wrappers: `./setup.sh` (macOS/Linux), `.\setup.ps1` (Windows). Then run:
+
+```bash
+./run.sh         # macOS / Linux
+run.bat          # Windows
+make run         # via make
+```
+
+The launcher opens the app at `http://127.0.0.1:4848`. Full instructions in [`SETUP.md`](SETUP.md).
+
+## Large uploads
+
+The default upload limit is **5 GB**. Override with the `SHINYML_MAX_UPLOAD_GB`
+environment variable before launching:
+
+```bash
+SHINYML_MAX_UPLOAD_GB=20 ./run.sh
+```
+
+This is set via `options(shiny.maxRequestSize = ...)` in `app.R`.
+
+## Survey templates (PHF & HFCN)
+
+The Survey & Panel tab ships with one-click templates for two euro-area
+household-finance panels:
+
+- **Bundesbank Panel on Household Finances (PHF)** — replicate weights
+  via `^wr_` (Fay), 5 implicates (long), strata `wsr`, household id `hid`.
+- **ECB Household Finance and Consumption Network (HFCN)** — replicate
+  weights via `^hw[0-9]{4}$` (bootstrap), 5 implicates (wide
+  `*_imp1..5`), strata `sa0100`.
+
+Pick **Replicate weights** as the design method, then click **Apply PHF**
+or **Apply HFCN** to auto-fill the form. See
+[`docs/survey_designs.md`](docs/survey_designs.md) for the full column
+conventions.
+
+After declaring the design, click **Send to Model Lab →**: a derived
+dataset slot is materialised, `state$meta$sample_weights` is wired up,
+and the navbar switches to Model Lab. Models that support `weights`
+(`lm`, `glm`, `glmnet`, `ranger`, `xgboost`, `gam`) automatically use
+the survey weights; the run log states explicitly when a model ignores
+them.
+
+## Project save / load + brief reports
+
+Every tab exposes **Save Project**: writes a self-contained bundle to
+`~/.shinyml/projects/<name>/` containing the recipe, survey design,
+trained model (if any), and the reproducibility manifest. The navbar
+**PROJECT** picker lists saved bundles; **Load** rehydrates the state.
+
+**Brief Report (HTML / PDF)** is exportable from Model Lab, Survey, and
+Editorial Studio. PDF is rendered via `pagedown::chrome_print` when
+Chrome is detected, with a fallback to `rmarkdown` + `pandoc`. If
+neither is available, the HTML output is produced and a notice is
+surfaced.
+
+## Reproducibility manifest
+
+Every project save and report export embeds a manifest with: app
+version (git commit), dataset (name, n_rows × n_cols, SHA-256, source),
+recipe step list, survey design (if any), model spec, validation
+strategy, headline metrics + bootstrap CI, distilled `sessionInfo()`,
+Python / TF versions when reticulate is active, and the git commit
+hash. Click **Show Manifest** in Model Lab or Editorial Studio to view
+it pretty-printed.
+
+## Theme picker
+
+The navbar has two pickers:
+
+- **Chrome** — app-wide chrome theme. **Bundesbank Light** is the
+  default; **Editorial Dark** preserves the existing dark UI;
+  **Light Minimal** for a clean light variant.
+- **Plot theme** — affects every Plotly chart. Defaults to Bundesbank.
 
 ## Features
 

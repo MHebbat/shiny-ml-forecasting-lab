@@ -2,9 +2,12 @@
 # Module: Survey & Panel Analysis
 #   Built on `survey` + `srvyr` (loaded lazily). Falls back to
 #   unweighted base-R when those packages are unavailable.
-#   Includes: design declaration, weighted descriptives, weighted
-#   crosstabs (chi-square design-corrected), Likert renderer, codebook,
-#   panel handlers (attrition, transitions), AI interpretation hook.
+#   Includes: design declaration (Standard Taylor or Replicate-weights),
+#   complex-survey templates (PHF, HFCN), multi-implicate (MI) detection,
+#   weighted descriptives + crosstabs, Likert renderer, codebook,
+#   panel handlers (attrition, transitions), and a "Send to Model Lab"
+#   bridge that materialises a survey-prepped dataset slot and switches
+#   the navbar to Model Lab.
 # =====================================================================
 
 # ---- Internal: strip haven_labelled and zap labels before svy* calls
@@ -24,11 +27,48 @@
   df
 }
 
+# ---- Multi-implicate detection --------------------------------------
+# Detects either a long-format `implicate` column or wide-format
+# imputed value sets like `var_imp1`, `var_imp2`. Returns
+# list(kind = "none" | "long" | "wide", ...).
+detect_implicates <- function(df) {
+  long_cols <- intersect(names(df),
+                          c("implicate", "imputation", "imp", "imp_id"))
+  if (length(long_cols) > 0) {
+    implicate_col <- long_cols[1]
+    n_imp <- length(unique(stats::na.omit(df[[implicate_col]])))
+    return(list(kind = "long", column = implicate_col, n = n_imp))
+  }
+  # Wide: "imp1"/"imp2"/... or "_i1"/"_i2"/... markers
+  pat <- "(_imp|_i)([0-9]+)$"
+  mset <- grepl(pat, names(df))
+  if (any(mset)) {
+    nums <- as.integer(sub(paste0(".*", pat), "\\2", names(df)[mset]))
+    n_imp <- length(unique(nums))
+    if (n_imp >= 2)
+      return(list(kind = "wide",
+                  pattern = pat,
+                  n = n_imp))
+  }
+  list(kind = "none", n = 0)
+}
+
 # ---- Survey design helper -------------------------------------------
-# Returns list(design=, kind=, message=, df=). df is the (possibly
-# row-filtered) frame that backs the design — useful for fallbacks.
-make_design <- function(df, weight_col = NULL, strata_col = NULL,
-                         psu_col = NULL) {
+# Builds either a Taylor-linearisation svydesign or a replicate-weights
+# svrepdesign, plus optional implicates. Returns a list with $design,
+# $kind ("standard" | "replicate" | "unweighted" | "error"),
+# $message, $df, $implicates (NULL when not detected).
+make_design <- function(df,
+                         method = c("standard", "replicate"),
+                         weight_col = NULL, strata_col = NULL,
+                         psu_col = NULL,
+                         repweights_pattern = NULL,
+                         repdesign_type = "BRR",
+                         combined_weights = TRUE,
+                         use_mse = TRUE,
+                         implicates = NULL) {
+  method <- match.arg(method)
+
   norm <- function(x) {
     if (is.null(x)) return(NULL)
     if (length(x) == 0) return(NULL)
@@ -43,7 +83,7 @@ make_design <- function(df, weight_col = NULL, strata_col = NULL,
 
   df2 <- .svy_zap(df)
 
-  # If a weight column is given, drop rows with NA / non-positive weight
+  # Drop rows with non-positive / NA weight (when given)
   if (!is.null(weight_col)) {
     w <- suppressWarnings(as.numeric(df2[[weight_col]]))
     keep <- !is.na(w) & is.finite(w) & w > 0
@@ -54,9 +94,46 @@ make_design <- function(df, weight_col = NULL, strata_col = NULL,
   if (!requireNamespace("survey", quietly = TRUE)) {
     return(list(design = NULL, kind = "unweighted",
                  message = "Install 'survey' for weighted analysis",
-                 df = df2))
+                 df = df2, implicates = implicates))
   }
 
+  if (method == "replicate") {
+    if (is.null(repweights_pattern) || !nzchar(repweights_pattern))
+      return(list(design = NULL, kind = "error",
+                   message = "Replicate-weights pattern is required.",
+                   df = df2, implicates = implicates))
+    rep_cols <- grep(repweights_pattern, names(df2), value = TRUE)
+    if (length(rep_cols) == 0)
+      return(list(design = NULL, kind = "error",
+                   message = sprintf("No columns match pattern '%s'.",
+                                       repweights_pattern),
+                   df = df2, implicates = implicates))
+    repdesign_type <- toupper(as.character(repdesign_type %||% "BRR"))
+    rep_args <- list(
+      data        = df2,
+      repweights  = df2[, rep_cols, drop = FALSE],
+      type        = repdesign_type,
+      combined.weights = isTRUE(combined_weights),
+      mse         = isTRUE(use_mse)
+    )
+    if (!is.null(weight_col)) rep_args$weights <- df2[[weight_col]]
+    des <- tryCatch(do.call(survey::svrepdesign, rep_args),
+                     error = function(e) {
+                       attr(e, "err") <- conditionMessage(e); NULL
+                     })
+    if (is.null(des))
+      return(list(design = NULL, kind = "error",
+                   message = "Could not declare replicate-weight design.",
+                   df = df2, implicates = implicates))
+    return(list(design = des, kind = "replicate",
+                 message = sprintf(
+                   "Replicate design (%s, %d replicates) on %d rows",
+                   repdesign_type, length(rep_cols), nrow(df2)),
+                 df = df2, implicates = implicates,
+                 rep_cols = rep_cols))
+  }
+
+  # Standard Taylor linearisation
   ids     <- if (!is.null(psu_col)) stats::as.formula(paste0("~", psu_col)) else stats::as.formula("~1")
   strata  <- if (!is.null(strata_col)) stats::as.formula(paste0("~", strata_col)) else NULL
   weights <- if (!is.null(weight_col)) stats::as.formula(paste0("~", weight_col)) else NULL
@@ -65,25 +142,26 @@ make_design <- function(df, weight_col = NULL, strata_col = NULL,
     survey::svydesign(ids = ids, strata = strata, weights = weights,
                        data = df2, nest = TRUE),
     error = function(e) {
-      attr(des, "err") <- conditionMessage(e); NULL
+      attr(e, "err") <- conditionMessage(e); NULL
     })
   if (is.null(des)) {
     msg <- tryCatch(
       survey::svydesign(ids = ids, strata = strata, weights = weights,
-                         data = df2),  # retry without nest
+                         data = df2),
       error = function(e) conditionMessage(e))
-    if (inherits(msg, "survey.design")) {
-      return(list(design = msg, kind = "weighted",
-                   message = "Declared (without nesting)", df = df2))
-    }
+    if (inherits(msg, "survey.design"))
+      return(list(design = msg, kind = "standard",
+                   message = "Declared (without nesting)",
+                   df = df2, implicates = implicates))
     return(list(design = NULL, kind = "error",
-                 message = paste("Could not declare design:", as.character(msg)),
-                 df = df2))
+                 message = paste("Could not declare design:",
+                                  as.character(msg)),
+                 df = df2, implicates = implicates))
   }
-  kind <- if (is.null(weights)) "unweighted" else "weighted"
+  kind <- if (is.null(weights)) "unweighted" else "standard"
   list(design = des, kind = kind,
-        message = sprintf("Declared with %d rows", nrow(df2)),
-        df = df2)
+        message = sprintf("Standard design declared with %d rows", nrow(df2)),
+        df = df2, implicates = implicates)
 }
 
 # ---- Weighted descriptives ------------------------------------------
@@ -152,7 +230,6 @@ weighted_summary <- function(design, var) {
 detect_likert <- function(x, labels = NULL) {
   likert_kw <- paste0("agree|disagree|neutral|nie|selten|manchmal|oft|immer|",
                       "strongly|always|never|trifft\\s*zu|stimme")
-  # If haven_labelled with a small label set, examine the label names
   if (inherits(x, "haven_labelled")) {
     val_lab <- attr(x, "labels", exact = TRUE)
     if (!is.null(val_lab)) {
@@ -195,7 +272,6 @@ panel_summary <- function(df, id_col, wave_col) {
   obs_per_unit <- table(ids)
   full_balance <- mean(obs_per_unit == n_waves)
   attrition <- 1 - full_balance
-  # First/last wave size
   wsizes <- table(waves)
   list(
     n_units = n_units,
@@ -215,8 +291,6 @@ build_codebook <- function(df, labels = list()) {
   if (is.null(labels)) labels <- list()
   vlabs <- labels$var_labels %||% list()
   vvlabs <- labels$value_labels %||% list()
-  # Also pull labels straight off column attributes if `labels` is empty —
-  # haven_labelled keeps them on the column even after harmonize_labelled.
   rows <- lapply(names(df), function(nm) {
     x <- df[[nm]]
     vlab <- vlabs[[nm]]
@@ -247,9 +321,6 @@ build_codebook <- function(df, labels = list()) {
 }
 
 # ---- Synthetic survey demo dataset ----------------------------------
-# Builds a small data.frame with weight, strata, psu, id, wave, plus a
-# Likert variable and a categorical with value labels via haven::labelled
-# (or a plain factor fallback if haven is not installed).
 make_survey_demo <- function(n = 400, seed = 42) {
   set.seed(seed)
   region <- sample(c("North","South","East","West"), n, TRUE)
@@ -260,7 +331,6 @@ make_survey_demo <- function(n = 400, seed = 42) {
   weight <- round(runif(n, 0.4, 2.5), 3)
   age    <- sample(18:80, n, TRUE)
   income <- round(rlnorm(n, meanlog = 10.2, sdlog = 0.4))
-  # Likert satisfaction (1=strongly disagree ... 5=strongly agree)
   sat    <- sample(1:5, n, TRUE, prob = c(0.10, 0.18, 0.24, 0.28, 0.20))
   edu    <- sample(1:4, n, TRUE, prob = c(0.20, 0.35, 0.30, 0.15))
 
@@ -291,7 +361,6 @@ make_survey_demo <- function(n = 400, seed = 42) {
       labels = c("None/Primary","Secondary","Tertiary","Postgrad"))
     attr(df$education, "label") <- "Highest education attained"
   }
-  # Variable labels (work for both haven and fallback paths)
   attr(df$age, "label")    <- "Age in years"
   attr(df$income, "label") <- "Annual income (local currency)"
   attr(df$weight, "label") <- "Survey weight"
@@ -300,6 +369,50 @@ make_survey_demo <- function(n = 400, seed = 42) {
   attr(df$wave, "label")   <- "Survey wave (year)"
   df
 }
+
+# ---- Survey templates -----------------------------------------------
+# Each template returns a list of suggested column / parameter mappings
+# to populate the design declaration form.
+SURVEY_TEMPLATES <- list(
+  phf = list(
+    label = "Bundesbank Panel on Household Finances (PHF)",
+    description = paste(
+      "Bundesbank PHF: weight = `wgt`, replicate weights = `wr_*`",
+      "(BRR / Fay), strata = `wsr` / sampling stratum, PSU = `wsr` / `psu`,",
+      "household id = `hid`, person id = `pid`, multi-implicate = 5 (long",
+      "format with `implicate` column).", sep = " "),
+    method = "replicate",
+    weight = c("wgt", "weight", "phf_wgt"),
+    repweights_pattern = "^wr_|^wgt_rep_|^repwgt_",
+    repdesign_type = "Fay",
+    combined_weights = TRUE,
+    use_mse = TRUE,
+    strata = c("wsr", "stratum", "schicht"),
+    psu = c("psu", "cluster", "wsr"),
+    id  = c("hid", "pid", "household_id"),
+    wave = c("wave", "welle"),
+    implicate = c("implicate", "imp", "imp_id")
+  ),
+  hfcn = list(
+    label = "ECB Household Finance and Consumption Network (HFCN)",
+    description = paste(
+      "ECB HFCN: weight = `hw0001` (household), replicate weights",
+      "`hw0002`-`hw1000`, strata = `sa0100`, PSU = `sa0010`,",
+      "household id = `id`, multi-implicate = 5 (wide `*_imp1..5`).",
+      sep = " "),
+    method = "replicate",
+    weight = c("hw0001", "weight", "hfcn_weight"),
+    repweights_pattern = "^hw[0-9]{4}$|^hw_rep_|^wgt_rep_",
+    repdesign_type = "bootstrap",
+    combined_weights = TRUE,
+    use_mse = TRUE,
+    strata = c("sa0100", "stratum"),
+    psu = c("sa0010", "psu"),
+    id  = c("id", "hid"),
+    wave = c("wave"),
+    implicate = c("implicate", "imp")
+  )
+)
 
 # ---- UI / Server -----------------------------------------------------
 survey_ui <- function(id) {
@@ -314,12 +427,35 @@ survey_ui <- function(id) {
                       icon = icon("flask"))),
       tags$small(class = "text-muted", style = "display:block;margin-bottom:8px;",
         "Demo creates a synthetic dataset with weight / strata / PSU / id / wave plus a labelled Likert item."),
+      tags$div(class = "studio-kicker", style = "margin-bottom:6px;", "TEMPLATES"),
+      div(style = "display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;",
+        actionButton(ns("tpl_phf"),  "Apply PHF",
+                      class = "btn-sm btn-outline-primary"),
+        actionButton(ns("tpl_hfcn"), "Apply HFCN",
+                      class = "btn-sm btn-outline-primary")),
+      tags$small(class = "text-muted", style = "display:block;margin-bottom:8px;",
+        "Templates auto-fill the form with PHF / HFCN column conventions."),
+      tags$hr(class = "studio-rule", style = "margin:6px 0;"),
+      tags$div(class = "studio-kicker", style = "margin-bottom:6px;", "METHOD"),
+      radioButtons(ns("design_method"), NULL, inline = TRUE,
+                    choices = c("Standard (Taylor)" = "standard",
+                                "Replicate weights" = "replicate"),
+                    selected = "standard"),
       uiOutput(ns("design_inputs")),
+      uiOutput(ns("repweight_inputs")),
+      uiOutput(ns("implicate_badge")),
       hr(),
       actionButton(ns("declare"), "Declare design",
                     class = "btn-primary w-100", icon = icon("check")),
       hr(),
-      uiOutput(ns("design_status"))
+      uiOutput(ns("design_status")),
+      hr(),
+      actionButton(ns("send_modellab"), "Send to Model Lab →",
+                    class = "btn-warning w-100",
+                    icon = icon("paper-plane")),
+      tags$small(class = "text-muted", style = "display:block;margin-top:6px;",
+        "Materialises a survey-prepped slot in the workspace and switches to Model Lab. ",
+        "Models that support 'weights' will use the declared survey weights.")
     ),
     div(
       uiOutput(ns("hero_panel")),
@@ -336,13 +472,24 @@ survey_ui <- function(id) {
   )
 }
 
-survey_server <- function(id, state) {
+survey_server <- function(id, state, parent_session = NULL) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     design_state <- reactiveVal(list(design = NULL, kind = "none",
-                                      message = "Not declared yet"))
+                                      message = "Not declared yet",
+                                      df = NULL, implicates = NULL))
 
-    # ---- inputs auto-suggested from heuristics ---------------------
+    .first_match <- function(candidates, names_in_df) {
+      hit <- intersect(candidates, names_in_df)
+      if (length(hit) > 0) return(hit[1])
+      # case-insensitive fallback
+      lower <- tolower(names_in_df)
+      cand_lower <- tolower(candidates)
+      i <- which(lower %in% cand_lower)
+      if (length(i) > 0) return(names_in_df[i[1]])
+      NA_character_
+    }
+
     output$design_inputs <- renderUI({
       req(state$raw_data)
       cols <- c("(none)", names(state$raw_data))
@@ -363,8 +510,113 @@ survey_server <- function(id, state) {
       )
     })
 
-    # ---- "Load survey demo" — adds a synthetic survey dataset to the
-    # workspace (always activates so the user can immediately exercise it).
+    # Replicate-weight inputs (visible when method == 'replicate')
+    output$repweight_inputs <- renderUI({
+      req(input$design_method)
+      if (input$design_method != "replicate") return(NULL)
+      tagList(
+        tags$hr(class = "studio-rule"),
+        tags$div(class = "studio-kicker", "REPLICATE-WEIGHT CONFIG"),
+        textInput(ns("rep_pattern"), "Replicate-weight column regex",
+                   value = "^wgt_rep_|^repwgt_|^wr_"),
+        selectInput(ns("rep_type"), "Replicate type",
+                     choices = c("BRR", "Fay", "JK1", "JK2", "JKn",
+                                 "bootstrap", "ACS"),
+                     selected = "BRR"),
+        checkboxInput(ns("rep_combined"),
+                       "Replicate weights are combined (final, not multipliers)",
+                       value = TRUE),
+        checkboxInput(ns("rep_mse"),
+                       "Use MSE estimator (recommended)",
+                       value = TRUE),
+        tags$small(class = "text-muted", style = "display:block;",
+          "Pattern matches column names. PHF uses `^wr_`; HFCN uses `^hw[0-9]{4}$`. ",
+          "Apply a template to auto-fill.")
+      )
+    })
+
+    # Multi-implicate badge
+    implicate_info <- reactive({
+      req(state$raw_data)
+      tryCatch(detect_implicates(state$raw_data),
+                error = function(e) list(kind = "none", n = 0))
+    })
+
+    output$implicate_badge <- renderUI({
+      info <- implicate_info()
+      if (is.null(info) || info$kind == "none" || info$n < 2) return(NULL)
+      msg <- if (info$kind == "long")
+        sprintf("MI detected: %d implicates in `%s` (long)", info$n, info$column)
+      else sprintf("MI detected: %d implicates (wide pattern)", info$n)
+      tags$div(class = "alert alert-info",
+               style = "padding:6px 10px; margin-top:8px;",
+               icon("layer-group"), tags$b(" "), msg,
+               tags$br(),
+               tags$small("Descriptives use the first implicate. ",
+                           "Pooling via Rubin's rules is staged for commit B."))
+    })
+
+    # ---- Templates ------------------------------------------------
+    # Holder for deferred replicate-weight settings; consumed by the
+    # observer below once the replicate-weight renderUI has populated.
+    pending_tpl_apply <- reactiveVal(NULL)
+    .apply_template <- function(tpl_id) {
+      tpl <- SURVEY_TEMPLATES[[tpl_id]]
+      req(tpl)
+      df <- state$raw_data
+      if (is.null(df)) {
+        flash("Load a dataset before applying a template.", "warning")
+        return()
+      }
+      cn <- names(df)
+      pick <- function(cands) .first_match(cands, cn)
+      updateRadioButtons(session, "design_method",
+                         selected = tpl$method %||% "standard")
+      # delay slightly so dependent UI renders before update
+      shiny::isolate({
+        upd_select <- function(id, val) {
+          if (!is.na(val) && nzchar(val))
+            updateSelectInput(session, id, selected = val)
+          else
+            updateSelectInput(session, id, selected = "(none)")
+        }
+        upd_select("weight",  pick(tpl$weight))
+        upd_select("strata",  pick(tpl$strata))
+        upd_select("psu",     pick(tpl$psu))
+        upd_select("id_col",  pick(tpl$id))
+        upd_select("wave_col",pick(tpl$wave))
+      })
+      # Defer replicate-weight controls until renderUI rebuilds them.
+      # Use a one-shot observer that fires after the next input flush.
+      pending_tpl_apply(list(tpl = tpl, ts = Sys.time()))
+      flash(sprintf("Template applied: %s", tpl$label), "message")
+    }
+    # Observer to apply pending replicate-weight settings once renderUI
+    # has built the rep_pattern / rep_type controls.
+    observe({
+      pending <- pending_tpl_apply()
+      if (is.null(pending)) return()
+      tpl <- pending$tpl
+      if (isTRUE(input$design_method == "replicate")) {
+        tryCatch({
+          updateTextInput(session, "rep_pattern",
+                           value = tpl$repweights_pattern %||% "")
+          updateSelectInput(session, "rep_type",
+                             selected = tpl$repdesign_type %||% "BRR")
+          updateCheckboxInput(session, "rep_combined",
+                               value = isTRUE(tpl$combined_weights))
+          updateCheckboxInput(session, "rep_mse",
+                               value = isTRUE(tpl$use_mse))
+        }, error = function(e) NULL)
+        # Clear pending so we don't re-apply
+        pending_tpl_apply(NULL)
+      }
+    })
+
+    observeEvent(input$tpl_phf,  .apply_template("phf"))
+    observeEvent(input$tpl_hfcn, .apply_template("hfcn"))
+
+    # ---- Demo loader ----------------------------------------------
     observeEvent(input$load_demo, {
       d <- tryCatch(make_survey_demo(),
                     error = function(e) { flash(conditionMessage(e), "error"); NULL })
@@ -388,17 +640,33 @@ survey_server <- function(id, state) {
       flash("Loaded survey_demo and made it active", "message")
     })
 
+    # ---- Declare design ------------------------------------------
     observeEvent(input$declare, {
       req(state$raw_data)
+      method <- input$design_method %||% "standard"
       d <- make_design(state$raw_data,
+                        method = method,
                         weight_col = input$weight,
                         strata_col = input$strata,
-                        psu_col    = input$psu)
+                        psu_col    = input$psu,
+                        repweights_pattern = if (method == "replicate")
+                          input$rep_pattern else NULL,
+                        repdesign_type = input$rep_type %||% "BRR",
+                        combined_weights = isTRUE(input$rep_combined %||% TRUE),
+                        use_mse = isTRUE(input$rep_mse %||% TRUE),
+                        implicates = implicate_info())
       d$df <- state$raw_data
       design_state(d)
       state$survey_design <- list(
+        method = method,
         weight = input$weight, strata = input$strata, psu = input$psu,
-        id = input$id_col, wave = input$wave_col, kind = d$kind)
+        id = input$id_col, wave = input$wave_col, kind = d$kind,
+        repweights_pattern = if (method == "replicate")
+          input$rep_pattern else NULL,
+        repdesign_type = input$rep_type %||% NA_character_,
+        combined_weights = isTRUE(input$rep_combined %||% TRUE),
+        use_mse = isTRUE(input$rep_mse %||% TRUE),
+        implicates = d$implicates)
       tryCatch(db_save_survey_design(state$dataset_id,
                                        state$survey_design),
                 error = function(e) NULL)
@@ -407,40 +675,148 @@ survey_server <- function(id, state) {
 
     output$design_status <- renderUI({
       d <- design_state()
-      icon_name <- if (d$kind == "weighted") "circle-check"
-                    else if (d$kind == "error") "triangle-exclamation"
-                    else "circle-info"
-      bg <- if (d$kind == "weighted") "alert-success"
-            else if (d$kind == "error") "alert-danger"
-            else "alert-secondary"
+      icon_name <- switch(d$kind,
+        "standard"   = "circle-check",
+        "replicate"  = "circle-check",
+        "error"      = "triangle-exclamation",
+        "circle-info")
+      bg <- switch(d$kind,
+        "standard"  = "alert-success",
+        "replicate" = "alert-success",
+        "error"     = "alert-danger",
+        "alert-secondary")
       div(class = sprintf("alert %s", bg),
         icon(icon_name), tags$b(toupper(d$kind)), " - ", d$message)
+    })
+
+    # ---- Send to Model Lab ---------------------------------------
+    observeEvent(input$send_modellab, {
+      if (is.null(state$raw_data)) {
+        flash("Load a dataset first.", "warning")
+        return()
+      }
+      sd <- state$survey_design
+      if (is.null(sd)) {
+        flash("Declare a survey design first.", "warning")
+        return()
+      }
+      df <- state$raw_data
+      base_name <- state$dataset_name %||% "dataset"
+      slot_name <- sprintf("%s (survey-prepped)", base_name)
+
+      ds <- state$datasets %||% list()
+      i <- length(ds) + 1L
+      ds_id <- sprintf("ds_%d", i)
+      while (ds_id %in% names(ds)) { i <- i + 1L; ds_id <- sprintf("ds_%d", i) }
+
+      # Build a meta block carrying survey-related hints into Model Lab
+      cur_meta <- state$meta %||% list()
+      sample_w  <- if (!is.null(sd$weight) && sd$weight != "(none)")
+                      sd$weight else NA_character_
+      strata_v  <- if (!is.null(sd$strata) && sd$strata != "(none)")
+                      sd$strata else NA_character_
+      psu_v     <- if (!is.null(sd$psu)    && sd$psu    != "(none)")
+                      sd$psu    else NA_character_
+      rep_cols  <- if (!is.null(sd$repweights_pattern) &&
+                       nzchar(sd$repweights_pattern))
+                      grep(sd$repweights_pattern, names(df), value = TRUE)
+                    else character(0)
+
+      new_meta <- modifyList(cur_meta, list(
+        sample_weights    = sample_w,
+        strata            = strata_v,
+        psu               = psu_v,
+        replicate_weights = rep_cols,
+        survey_method     = sd$method %||% "standard"
+      ))
+
+      labels <- tryCatch(extract_labels(df), error = function(e) list())
+      hints  <- tryCatch(detect_survey_columns(df, labels),
+                          error = function(e) list())
+      ds[[ds_id]] <- list(
+        name         = slot_name,
+        data         = df,
+        labels       = labels,
+        survey_hints = hints,
+        meta         = new_meta,
+        format       = "survey-prepped",
+        loaded_at    = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        n_rows       = nrow(df),
+        n_cols       = ncol(df)
+      )
+      state$datasets  <- ds
+      state$active_id <- ds_id
+      state$meta      <- new_meta
+      # Make a starter prepped frame so Model Lab is "ready" — the user
+      # can re-run Data Prep to refine.
+      state$prepped <- df
+
+      if (!is.null(parent_session))
+        bslib::nav_select("main_nav", "6 · Model Lab",
+                          session = parent_session)
+
+      flash(sprintf("Sent '%s' to Model Lab. Weights: %s",
+                    slot_name,
+                    if (is.na(sample_w)) "(none)" else sample_w),
+            "message")
     })
 
     # ---- Hero header ----------------------------------------------
     output$hero_panel <- renderUI({
       req(state$raw_data)
       d <- design_state()
-      grade_col <- if (d$kind == "weighted") "#3fb950" else "#8b949e"
+      grade_col <- if (d$kind %in% c("standard","replicate"))
+                     "#3fb950" else "#8b949e"
       div(class = "studio-intro", style = "margin-top:12px;",
         div(class = "studio-page",
           div(class = "studio-hero",
             div(class = "studio-hero-meta",
-              tags$span(class = "studio-kicker", "SURVEY \u0026 PANEL"),
-              tags$span(class = "studio-dot", "\u2022"),
+              tags$span(class = "studio-kicker", "SURVEY & PANEL"),
+              tags$span(class = "studio-dot", "•"),
               tags$span(class = "studio-grade",
                 style = sprintf("color:%s;border-color:%s;", grade_col, grade_col),
                 toupper(d$kind))),
             tags$h1(class = "studio-headline",
-              ifelse(is.null(state$dataset_name),
-                      "Untitled survey", state$dataset_name)),
+              tagList(ifelse(is.null(state$dataset_name),
+                                "Untitled survey", state$dataset_name),
+                       doc_chip("survey", "Survey & Panel"))),
             tags$p(class = "studio-deck",
-              sprintf("%s rows \u00B7 %s columns \u00B7 %s",
+              sprintf("%s rows · %s columns · %s",
                        formatC(nrow(state$raw_data), format = "d", big.mark = ","),
                        ncol(state$raw_data),
                        d$message)),
-            div(class = "studio-rule"))))
+            div(class = "studio-rule"),
+            tags$div(style = "margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;",
+              actionButton(ns("save_project"), "Save Project",
+                            class = "btn-outline-warning btn-sm",
+                            icon = icon("floppy-disk")),
+              downloadButton(ns("export_brief_html"), "Brief Report (HTML)",
+                              class = "btn-outline-info btn-sm")
+            ))))
     })
+
+    # ---- Save project ----------------------------------------------
+    observeEvent(input$save_project, {
+      bundle <- tryCatch(project_save(state),
+                          error = function(e) {
+                            flash(paste("Save failed:",
+                                          conditionMessage(e)), "error"); NULL })
+      if (!is.null(bundle))
+        flash(sprintf("Project saved to %s", bundle), "message")
+    })
+    output$export_brief_html <- downloadHandler(
+      filename = function()
+        sprintf("survey_report_%s.html",
+                format(Sys.time(), "%Y%m%d_%H%M%S")),
+      content = function(file) {
+        r <- tryCatch(render_brief_report(state, format = "html",
+                                            file_path = file,
+                                            theme = state$chrome_theme %||% "bundesbank"),
+                       error = function(e) NULL)
+        if (is.null(r) || !file.exists(file))
+          writeLines("<p>Report failed.</p>", file)
+      }
+    )
 
     # ---- Codebook --------------------------------------------------
     output$codebook <- DT::renderDT({
@@ -488,6 +864,8 @@ survey_server <- function(id, state) {
       r <- df[[input$xt_row]]; c <- df[[input$xt_col]]
       if (!is.null(d$design) && requireNamespace("survey", quietly = TRUE)) {
         f <- stats::as.formula(paste("~", input$xt_row, "+", input$xt_col))
+        # For replicate designs survey::svytable / svychisq still work
+        # because svrepdesign carries the same dispatch.
         tab <- tryCatch(survey::svytable(f, d$design),
                          error = function(e) NULL)
         chi <- tryCatch(survey::svychisq(f, d$design),
@@ -551,7 +929,7 @@ survey_server <- function(id, state) {
         "Waves: ", ps$n_waves, "\n",
         "Total observations: ", ps$n_observations, "\n",
         "Avg obs / unit: ", ps$avg_obs_per_unit, "\n",
-        "Balanced: ", ps$pct_balanced, "% \u00B7 Attrition: ", ps$pct_attrition, "%\n\n",
+        "Balanced: ", ps$pct_balanced, "% · Attrition: ", ps$pct_attrition, "%\n\n",
         "Wave sizes:\n",
         paste(sprintf("  %s : %d", ps$waves$wave, ps$waves$n), collapse = "\n")
       )

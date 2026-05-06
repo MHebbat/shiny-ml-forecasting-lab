@@ -46,7 +46,11 @@ if (!exists("%||%", mode = "function"))
 # missing. keras3 / keras need a Python TF runtime configured separately.
 .shinyml_optional <- c("prophet", "lightgbm", "catboost",
                        "keras3", "keras", "TSLSTMplus",
-                       "themis", "future")
+                       "themis", "future",
+                       # PDF report rendering (Chrome-print)
+                       "pagedown",
+                       # Markdown -> PDF fallback
+                       "rmarkdown")
 
 install_r_packages <- function(dry_run = FALSE) {
   repos <- getOption("repos")

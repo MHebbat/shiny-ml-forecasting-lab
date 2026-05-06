@@ -28,6 +28,14 @@ P <- function(name, label, type = "numeric", default = NULL, min = NULL, max = N
 # Quick safe loader
 .has <- function(pkg) requireNamespace(pkg, quietly = TRUE)
 
+# Validate a weights vector aligned with nrow(df). Accepts NULL.
+.weights_ok <- function(w, n) {
+  if (is.null(w)) return(FALSE)
+  w <- suppressWarnings(as.numeric(w))
+  if (length(w) != n) return(FALSE)
+  any(is.finite(w) & w > 0)
+}
+
 # Common availability helpers
 avail_ok <- function() list(ok = TRUE, msg = NULL)
 avail_pkg <- function(pkg, hint = NULL) {
@@ -216,10 +224,13 @@ fit_lm <- function(df, target, params, time_col = NULL) {
   na_action <- params$na_action %||% "na.omit"
   rhs <- if (intercept) "." else ". - 1"
   f <- as.formula(paste(target, "~", rhs))
-  m <- lm(f, data = df,
-          na.action = switch(na_action,
-                              "na.exclude" = stats::na.exclude,
-                              stats::na.omit))
+  lm_args <- list(formula = f, data = df,
+                  na.action = switch(na_action,
+                                      "na.exclude" = stats::na.exclude,
+                                      stats::na.omit))
+  if (.weights_ok(params$weights, nrow(df)))
+    lm_args$weights <- as.numeric(params$weights)
+  m <- do.call(stats::lm, lm_args)
   list(model = m,
        predict = function(newdata, h = NULL) as.numeric(predict(m, newdata = newdata)),
        feat_imp = NULL)
@@ -231,10 +242,14 @@ fit_logit <- function(df, target, params, time_col = NULL) {
   df[[target]] <- as.factor(df[[target]])
   link <- params$link %||% "logit"
   f <- as.formula(paste(target, "~ ."))
-  m <- glm(f, data = df,
-           family = binomial(link = link),
-           control = glm.control(maxit  = as.integer(params$maxit %||% 50),
-                                  epsilon = as.numeric(params$epsilon %||% 1e-8)))
+  glm_args <- list(formula = f, data = df,
+                    family = binomial(link = link),
+                    control = glm.control(
+                      maxit  = as.integer(params$maxit %||% 50),
+                      epsilon = as.numeric(params$epsilon %||% 1e-8)))
+  if (.weights_ok(params$weights, nrow(df)))
+    glm_args$weights <- as.numeric(params$weights)
+  m <- do.call(stats::glm, glm_args)
   lev <- levels(df[[target]])
   list(model = m,
        predict = function(newdata, h = NULL) {
@@ -262,6 +277,8 @@ fit_glmnet <- function(df, target, params, time_col = NULL, family = "gaussian")
   fit_args <- list(x = x, y = y, alpha = alpha, family = family,
                    nfolds = nfolds, nlambda = nlambda,
                    standardize = standardize)
+  if (.weights_ok(params$weights, nrow(x)))
+    fit_args$weights <- as.numeric(params$weights)
   # Optional explicit lambda (numeric or "auto")
   if (is.numeric(lambda_user) && length(lambda_user) >= 1 &&
       all(lambda_user >= 0)) {
@@ -349,6 +366,8 @@ fit_ranger <- function(df, target, params, time_col = NULL, classification = FAL
   )
   if (!is.null(mtry_val) && !is.na(mtry_val)) rf_args$mtry <- mtry_val
   if (!is.na(max_depth) && max_depth > 0) rf_args$max.depth <- max_depth
+  if (.weights_ok(params$weights, nrow(df)))
+    rf_args$case.weights <- as.numeric(params$weights)
 
   m <- do.call(ranger::ranger, rf_args)
   list(model = m,
@@ -399,6 +418,8 @@ fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE)
     nrounds = as.integer(params$nrounds %||% 200),
     verbose = 0
   )
+  if (.weights_ok(params$weights, nrow(X)))
+    xg_args$weight <- as.numeric(params$weights)
   if (!is.na(early_stop) && early_stop > 0) {
     # xgboost requires a watchlist for early stopping; use training data so it
     # remains a valid signal even without a separate eval set.
@@ -440,10 +461,14 @@ fit_xgb <- function(df, target, params, time_col = NULL, classification = FALSE)
 fit_poisson <- function(df, target, params, time_col = NULL) {
   .assert_train_shapes(df[[target]], df, "Poisson GLM")
   link <- params$link %||% "log"
-  m <- glm(as.formula(paste(target, "~ .")), data = df,
-           family = poisson(link = link),
-           control = glm.control(maxit  = as.integer(params$maxit %||% 50),
-                                  epsilon = as.numeric(params$epsilon %||% 1e-8)))
+  glm_args <- list(formula = as.formula(paste(target, "~ .")), data = df,
+                    family = poisson(link = link),
+                    control = glm.control(
+                      maxit  = as.integer(params$maxit %||% 50),
+                      epsilon = as.numeric(params$epsilon %||% 1e-8)))
+  if (.weights_ok(params$weights, nrow(df)))
+    glm_args$weights <- as.numeric(params$weights)
+  m <- do.call(stats::glm, glm_args)
   list(model = m,
        predict = function(newdata, h = NULL) as.numeric(predict(m, newdata = newdata, type = "response")),
        feat_imp = NULL)
@@ -576,7 +601,13 @@ fit_prophet <- function(df, target, params, time_col = NULL) {
   if (!.has("prophet"))
     stop("Prophet not installed - run install.packages('prophet') to enable")
   if (is.null(time_col)) stop("Prophet requires a time column")
-  d <- data.frame(ds = as.Date(df[[time_col]]), y = as.numeric(df[[target]]))
+  d <- data.frame(
+    ds = safe_as_date(df[[time_col]], column_name = time_col),
+    y  = as.numeric(df[[target]]))
+  if (all(is.na(d$ds)))
+    stop(sprintf("Prophet: column '%s' could not be parsed as a date. ",
+                 time_col),
+         "Use Data Prep -> parse_datetime to declare its format.")
 
   yearly <- .parse_auto_lgl(params$yearly %||% "auto")
   weekly <- .parse_auto_lgl(params$weekly %||% "auto")

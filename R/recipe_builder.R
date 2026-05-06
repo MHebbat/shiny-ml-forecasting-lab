@@ -339,9 +339,15 @@ apply_recipe <- function(df, steps, target = NULL, time_col = NULL,
       }
       add(sprintf("lump_rare -> processed %d cols", length(tgts)))
     } else if (sid == "date_features") {
+      n_skipped <- 0L
       for (col in tgts) {
         x <- df[[col]]
-        if (!inherits(x, c("Date", "POSIXt"))) next
+        # If a string column was selected, try to coerce safely first.
+        if (!inherits(x, c("Date", "POSIXt"))) {
+          x <- safe_as_date(x, column_name = col)
+          if (all(is.na(x))) { n_skipped <- n_skipped + 1L; next }
+          df[[col]] <- x
+        }
         df[[paste0(col, "_year")]]  <- as.integer(format(x, "%Y"))
         df[[paste0(col, "_month")]] <- as.integer(format(x, "%m"))
         df[[paste0(col, "_dow")]]   <- as.integer(format(x, "%u"))
@@ -350,30 +356,33 @@ apply_recipe <- function(df, steps, target = NULL, time_col = NULL,
         df[[paste0(col, "_is_weekend")]] <-
           as.integer(as.integer(format(x, "%u")) %in% c(6L, 7L))
         df[[paste0(col, "_days_since_epoch")]] <-
-          as.integer(as.Date(x) - as.Date("1970-01-01"))
+          as.integer(suppressWarnings(as.Date(x)) - as.Date("1970-01-01"))
         # Keep the time column in place — only date features are added.
         if (!identical(col, time_col)) df[[col]] <- NULL
       }
-      add(sprintf("date_features -> expanded %d cols", length(tgts)))
+      add(sprintf("date_features -> expanded %d cols%s", length(tgts),
+                   if (n_skipped > 0L)
+                     sprintf(" (%d unparsed; check parse_datetime)", n_skipped) else ""))
     } else if (sid == "parse_datetime") {
       fmt <- as.character(p$format %||% "")
       tz <- as.character(p$tz %||% "UTC")
       as_kind <- tolower(as.character(p$as %||% "Date"))
+      n_failed <- 0L
       for (col in tgts) {
         x <- df[[col]]
         if (inherits(x, c("Date", "POSIXt"))) next
-        s <- as.character(x)
         v <- if (as_kind == "posix" || as_kind == "posixct" ||
                  as_kind == "datetime") {
-          if (nzchar(fmt)) as.POSIXct(s, format = fmt, tz = tz)
-          else as.POSIXct(s, tz = tz)
+          safe_as_posix(x, format = fmt, tz = tz, column_name = col)
         } else {
-          if (nzchar(fmt)) as.Date(s, format = fmt)
-          else as.Date(s)
+          safe_as_date(x, format = fmt, column_name = col)
         }
+        # Count fully-failed columns
+        if (all(is.na(v)) && any(!is.na(x))) n_failed <- n_failed + 1L
         df[[col]] <- v
       }
-      add(sprintf("parse_datetime -> coerced %d cols", length(tgts)))
+      add(sprintf("parse_datetime -> coerced %d cols%s", length(tgts),
+                   if (n_failed > 0L) sprintf(" (%d unparsed)", n_failed) else ""))
     } else if (sid == "yeo_johnson") {
       yeo <- function(v) sign(v) * log1p(abs(v))
       for (col in tgts) df[[col]] <- yeo(as.numeric(df[[col]]))

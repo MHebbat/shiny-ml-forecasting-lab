@@ -314,8 +314,10 @@ privacy_server <- function(id, state) {
                 style = sprintf("color:%s;border-color:%s;", grade_col, grade_col),
                 grade)),
             tags$h1(class = "studio-headline",
-                    if (nrow(d) == 0) "No scan run yet"
-                    else sprintf("%d findings", nrow(d))),
+                    tagList(
+                      if (nrow(d) == 0) "No scan run yet"
+                      else sprintf("%d findings", nrow(d)),
+                      doc_chip("privacy", "Privacy Audit"))),
             tags$p(class = "studio-deck",
               if (nrow(d) == 0) "Click 'Run privacy scan' to evaluate this dataset."
               else sprintf("%d critical \u00b7 %d warning \u00b7 AI egress %s",

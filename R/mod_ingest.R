@@ -86,8 +86,13 @@ ingest_ui <- function(id) {
         uiOutput(ns("save_ui"))
       ),
       card(
-        card_header(tagList(icon("layer-group"), "Workspace")),
-        uiOutput(ns("workspace_ui"))
+        card_header(tagList(icon("layer-group"), "Workspace",
+                             doc_chip("ingest", "Data Ingest"))),
+        uiOutput(ns("workspace_ui")),
+        hr(),
+        actionButton(ns("save_project"), "Save Project",
+                      class = "btn-outline-warning btn-sm w-100",
+                      icon = icon("floppy-disk"))
       )
     ),
     card(
@@ -270,14 +275,31 @@ ingest_server <- function(id, state) {
                     rownames = FALSE, class = "compact stripe")
     })
 
+    observeEvent(input$save_project, {
+      bundle <- tryCatch(project_save(state),
+                          error = function(e) {
+                            flash(paste("Save failed:",
+                                          conditionMessage(e)), "error"); NULL })
+      if (!is.null(bundle))
+        flash(sprintf("Project saved to %s", bundle), "message")
+    })
+
     # ---- Schema configuration (for active dataset) -------------------
     output$schema_ui <- renderUI({
       req(state$raw_data)
       df <- state$raw_data
       cols <- names(df)
-      time_candidates <- c("(none)", cols[sapply(df, function(c)
-        inherits(c, c("Date","POSIXt")) ||
-        (is.character(c) && !any(is.na(suppressWarnings(as.Date(c))))) )])
+      time_candidates <- c("(none)", cols[sapply(df, function(c) {
+        if (inherits(c, c("Date","POSIXt"))) return(TRUE)
+        if (!is.character(c) && !is.factor(c)) return(FALSE)
+        s <- as.character(c)
+        s <- s[!is.na(s) & nzchar(s)]
+        if (length(s) == 0) return(FALSE)
+        v <- tryCatch(safe_as_date(utils::head(s, 50), column_name = "(probe)"),
+                      error = function(e) rep(NA, length(s)))
+        # at least 80% of probed values look like a date
+        sum(!is.na(v)) / length(v) >= 0.8
+      })])
       if (length(time_candidates) == 1) time_candidates <- c("(none)", cols)
       # Restore previous selection if the active dataset already has meta
       m <- state$meta %||% list()

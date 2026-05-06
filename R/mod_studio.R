@@ -26,7 +26,17 @@ studio_ui <- function(id) {
               downloadButton(ns("export_html"), "Export HTML",
                              class = "btn btn-outline-warning btn-sm"),
               downloadButton(ns("export_csv"), "Forecast CSV",
-                             class = "btn btn-outline-success btn-sm")
+                             class = "btn btn-outline-success btn-sm"),
+              downloadButton(ns("export_brief_html"), "Brief HTML",
+                             class = "btn btn-outline-info btn-sm"),
+              downloadButton(ns("export_brief_pdf"), "Brief PDF",
+                             class = "btn btn-outline-info btn-sm"),
+              actionButton(ns("save_project"), "Save Project",
+                           class = "btn btn-outline-warning btn-sm",
+                           icon = icon("floppy-disk")),
+              actionButton(ns("show_manifest"), "Manifest",
+                           class = "btn btn-outline-light btn-sm",
+                           icon = icon("file-code"))
           )
       ),
 
@@ -313,6 +323,73 @@ studio_server <- function(id, state) {
       }, character(1))
       paste(cites[nzchar(cites)], collapse = "\n")
     }
+
+    # ---- Brief report exports --------------------------------------
+    output$export_brief_html <- downloadHandler(
+      filename = function()
+        sprintf("brief_report_run%s_%s.html",
+                state$last_run_id %||% "0",
+                format(Sys.time(), "%Y%m%d_%H%M%S")),
+      content = function(file) {
+        r <- tryCatch(render_brief_report(state, format = "html",
+                                            file_path = file,
+                                            theme = state$chrome_theme %||% "bundesbank"),
+                       error = function(e) {
+                         writeLines(sprintf("<p>Report failed: %s</p>",
+                                              conditionMessage(e)), file)
+                         NULL
+                       })
+        if (is.null(r) || !file.exists(file))
+          writeLines("<p>Report failed to render.</p>", file)
+      }
+    )
+    output$export_brief_pdf <- downloadHandler(
+      filename = function()
+        sprintf("brief_report_run%s_%s.pdf",
+                state$last_run_id %||% "0",
+                format(Sys.time(), "%Y%m%d_%H%M%S")),
+      content = function(file) {
+        r <- tryCatch(render_brief_report(state, format = "pdf",
+                                            file_path = file,
+                                            theme = state$chrome_theme %||% "bundesbank"),
+                       error = function(e) NULL)
+        if (is.null(r) || !file.exists(file)) {
+          # Final fallback: HTML at the same path
+          tryCatch(render_brief_report(state, format = "html",
+                                         file_path = file,
+                                         theme = state$chrome_theme %||% "bundesbank"),
+                    error = function(e)
+                      writeLines("Report failed.", file))
+        }
+        if (!is.null(r) && !is.null(r$notice))
+          tryCatch(showNotification(r$notice, type = "default"),
+                    error = function(e) NULL)
+      }
+    )
+
+    # ---- Save project ----------------------------------------------
+    observeEvent(input$save_project, {
+      bundle <- tryCatch(project_save(state),
+                          error = function(e) {
+                            flash(paste("Save failed:",
+                                          conditionMessage(e)), "error"); NULL })
+      if (!is.null(bundle))
+        flash(sprintf("Project saved to %s", bundle), "message")
+    })
+
+    # ---- Show manifest --------------------------------------------
+    observeEvent(input$show_manifest, {
+      m <- tryCatch(make_manifest(state), error = function(e) list(error = conditionMessage(e)))
+      txt <- jsonlite::toJSON(m, auto_unbox = TRUE, pretty = TRUE,
+                                na = "null", null = "null")
+      showModal(modalDialog(
+        title = "Reproducibility Manifest",
+        size = "l", easyClose = TRUE,
+        tags$pre(style = "max-height:60vh;overflow:auto;",
+                  as.character(txt)),
+        footer = tagList(modalButton("Close"))
+      ))
+    })
 
     output$export_html <- downloadHandler(
       filename = function()

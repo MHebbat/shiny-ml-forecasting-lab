@@ -1,0 +1,193 @@
+/* =====================================================================
+   Bundesbank Light - app-wide chrome theme.
+   Activated when <body> has class "chrome-bundesbank".
+   ===================================================================== */
+body.chrome-bundesbank {
+  --bb-primary:    #003D7C;
+  --bb-secondary:  #B61F29;
+  --bb-bg:         #FAFAF7;
+  --bb-surface:    #FFFFFF;
+  --bb-text:       #1A1A1A;
+  --bb-muted:      #5C5C5C;
+  --bb-rule:       #D9D9D9;
+  --bb-ochre:      #C8A951;
+  background: var(--bb-bg) !important;
+  color: var(--bb-text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+body.chrome-bundesbank h1,
+body.chrome-bundesbank h2,
+body.chrome-bundesbank h3,
+body.chrome-bundesbank h4,
+body.chrome-bundesbank h5,
+body.chrome-bundesbank h6 {
+  font-family: 'Source Serif 4', 'PT Serif', Georgia, serif;
+  color: var(--bb-primary);
+}
+
+body.chrome-bundesbank .navbar {
+  background: var(--bb-surface) !important;
+  border-bottom: 1px solid var(--bb-rule) !important;
+}
+body.chrome-bundesbank .navbar .navbar-brand,
+body.chrome-bundesbank .navbar a,
+body.chrome-bundesbank .navbar .nav-link {
+  color: var(--bb-primary) !important;
+}
+body.chrome-bundesbank .navbar .nav-link.active {
+  color: var(--bb-secondary) !important;
+  border-bottom: 2px solid var(--bb-secondary);
+}
+
+body.chrome-bundesbank .card,
+body.chrome-bundesbank .bslib-card {
+  background: var(--bb-surface) !important;
+  border: 1px solid var(--bb-rule) !important;
+  box-shadow: none !important;
+  color: var(--bb-text);
+}
+body.chrome-bundesbank .card-header,
+body.chrome-bundesbank .bslib-card .card-header {
+  background: #F4F4F0 !important;
+  color: var(--bb-primary) !important;
+  border-bottom: 1px solid var(--bb-rule) !important;
+  font-weight: 600;
+}
+body.chrome-bundesbank .form-control,
+body.chrome-bundesbank .form-select,
+body.chrome-bundesbank .selectize-input {
+  background: var(--bb-surface) !important;
+  color: var(--bb-text) !important;
+  border-color: var(--bb-rule) !important;
+}
+body.chrome-bundesbank .form-control:focus,
+body.chrome-bundesbank .form-select:focus {
+  border-color: var(--bb-primary) !important;
+  box-shadow: 0 0 0 .15rem rgba(0,61,124,.18) !important;
+}
+
+body.chrome-bundesbank .btn-primary {
+  background: var(--bb-primary) !important;
+  border-color: var(--bb-primary) !important;
+  color: #fff !important;
+}
+body.chrome-bundesbank .btn-primary:hover {
+  background: #002b58 !important;
+  border-color: #002b58 !important;
+}
+body.chrome-bundesbank .btn-warning {
+  background: var(--bb-ochre) !important;
+  border-color: var(--bb-ochre) !important;
+  color: #1A1A1A !important;
+}
+body.chrome-bundesbank .btn-outline-primary {
+  color: var(--bb-primary) !important;
+  border-color: var(--bb-primary) !important;
+}
+body.chrome-bundesbank .btn-outline-primary:hover {
+  background: var(--bb-primary) !important;
+  color: #fff !important;
+}
+body.chrome-bundesbank .btn-danger,
+body.chrome-bundesbank .btn-outline-danger {
+  color: var(--bb-secondary) !important;
+  border-color: var(--bb-secondary) !important;
+}
+
+body.chrome-bundesbank .alert-success {
+  background:#EAF3EA !important;color:#1B5E20 !important;border:1px solid #C5E1A5 !important;
+}
+body.chrome-bundesbank .alert-info {
+  background:#E6EFF7 !important;color:var(--bb-primary) !important;border:1px solid #BFD3E6 !important;
+}
+body.chrome-bundesbank .alert-warning {
+  background:#FFF4DD !important;color:#8A5A00 !important;border:1px solid #F0D998 !important;
+}
+body.chrome-bundesbank .alert-danger {
+  background:#FBE6E8 !important;color:var(--bb-secondary) !important;border:1px solid #E9B5BB !important;
+}
+body.chrome-bundesbank .alert-secondary {
+  background:#F2F2EE !important;color:var(--bb-text) !important;border:1px solid var(--bb-rule) !important;
+}
+
+body.chrome-bundesbank table.dataTable thead {
+  background:#F0F4FA !important;color:var(--bb-primary) !important;
+}
+body.chrome-bundesbank table.dataTable tbody tr {
+  background:var(--bb-surface) !important;color:var(--bb-text) !important;
+}
+body.chrome-bundesbank table.dataTable.stripe tbody tr.odd {
+  background:#FAFAF7 !important;
+}
+body.chrome-bundesbank table.dataTable tbody tr:hover {
+  background:#EFF3F8 !important;
+}
+body.chrome-bundesbank .dataTables_wrapper { color: var(--bb-text); }
+
+body.chrome-bundesbank pre {
+  background: var(--bb-surface);
+  border: 1px solid var(--bb-rule);
+  color: var(--bb-text);
+}
+body.chrome-bundesbank code {
+  background: #F0F0F0;
+  color: var(--bb-primary);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* Studio "intro" hero on tabs other than Editorial Studio: light variant */
+body.chrome-bundesbank .studio-intro .studio-page {
+  background: var(--bb-surface) !important;
+  border: 1px solid var(--bb-rule) !important;
+  color: var(--bb-text);
+}
+body.chrome-bundesbank .studio-intro .studio-page::before {
+  background: linear-gradient(90deg, var(--bb-ochre) 0%, transparent 100%);
+}
+body.chrome-bundesbank .studio-intro .studio-headline {
+  font-family: 'Source Serif 4', 'PT Serif', Georgia, serif;
+  color: var(--bb-primary) !important;
+  font-weight: 700 !important;
+  font-size: 36px !important;
+}
+body.chrome-bundesbank .studio-intro .studio-deck {
+  color: var(--bb-muted) !important;
+}
+body.chrome-bundesbank .studio-intro .studio-kicker {
+  color: var(--bb-muted) !important;
+}
+body.chrome-bundesbank .studio-intro .studio-rule {
+  border-top: 1px solid var(--bb-rule) !important;
+  background: none !important;
+}
+
+/* Keep Editorial Studio's own studio-shell dark even in Bundesbank chrome. */
+body.chrome-bundesbank .studio-shell {
+  background: #0d0d0f !important;
+  color: #f5f3ee !important;
+}
+
+/* Light minimal chrome */
+body.chrome-light {
+  background: #FFFFFF !important;
+  color: #222;
+  font-family: 'Inter', sans-serif;
+}
+body.chrome-light .card { background:#FFFFFF !important;border:1px solid #E5E5E5 !important;color:#222; }
+body.chrome-light .card-header { background:#F8F8F8 !important;color:#222 !important; }
+
+/* Theme picker in navbar */
+.chrome-picker {
+  display:flex; align-items:center; gap:6px; margin-right:10px;
+}
+.chrome-picker .form-group, .chrome-picker .shiny-input-container {
+  margin-bottom: 0 !important;
+}
+
+/* Doc chip override for Bundesbank */
+body.chrome-bundesbank .doc-chip {
+  border-color: var(--bb-primary) !important;
+  color: var(--bb-primary) !important;
+}

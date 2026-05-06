@@ -34,7 +34,8 @@ dataprep_ui <- function(id) {
             tags$span(class = "studio-kicker", "REPRODUCIBLE RECIPE")
           ),
           tags$h1(class = "studio-headline",
-                  "Feature engineering applied prior to estimation."),
+                  tagList("Feature engineering applied prior to estimation.",
+                            doc_chip("dataprep", "Data Prep"))),
           tags$p(class = "studio-deck",
             "Each step is recorded as a JSON-serialisable recipe entry. ",
             "Numeric transforms never touch the declared time column; only ",
@@ -49,7 +50,10 @@ dataprep_ui <- function(id) {
                          class = "btn-outline-warning"),
             actionButton(ns("goto_modellab"),
                          tagList("Continue to Model Lab", HTML(" →")),
-                         class = "btn-primary")
+                         class = "btn-primary"),
+            actionButton(ns("save_project"), "Save Project",
+                          class = "btn-outline-warning btn-sm",
+                          icon = icon("floppy-disk"))
           )
         )
       )
@@ -179,6 +183,14 @@ dataprep_server <- function(id, state, parent_session = NULL) {
       if (!is.null(parent_session))
         bslib::nav_select("main_nav", "2 · Explore",
                           session = parent_session)
+    })
+    observeEvent(input$save_project, {
+      bundle <- tryCatch(project_save(state),
+                          error = function(e) {
+                            flash(paste("Save failed:",
+                                          conditionMessage(e)), "error"); NULL })
+      if (!is.null(bundle))
+        flash(sprintf("Project saved to %s", bundle), "message")
     })
     observeEvent(input$goto_modellab, {
       if (!is.null(parent_session))

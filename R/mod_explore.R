@@ -102,7 +102,8 @@ explore_ui <- function(id) {
             tags$span(class = "studio-kicker", "READ-ONLY DIAGNOSTICS")
           ),
           tags$h1(class = "studio-headline",
-                  "Exploratory Data Analysis."),
+                  tagList("Exploratory Data Analysis.",
+                            doc_chip("explore", "Explore"))),
           tags$p(class = "studio-deck",
             "Univariate distributions, missingness profile, correlation ",
             "structure, outlier diagnostics. Read-only — no transformations ",
