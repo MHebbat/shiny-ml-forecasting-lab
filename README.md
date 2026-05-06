@@ -7,7 +7,7 @@ A **pure R Shiny** application for end-to-end predictive modeling — upload dat
 R is the primary language. **Python (via [`reticulate`](https://rstudio.github.io/reticulate/)) is optional** — used only for the LightGBM / CatBoost / Keras-MLP wrappers. The app degrades gracefully if Python is not configured.
 
 ```
-Ingest → Explore → Model Lab → Predict → Dashboard → Editorial Studio → Runs
+Ingest → Explore → Data Prep → Privacy Audit → Survey & Panel → Model Lab → Predict → Dashboard → Editorial Studio → Runs
 ```
 
 ## Quick start (Mac · Windows · Linux — identical experience)
@@ -30,10 +30,12 @@ The launcher checks for `Rscript`, installs missing R packages (idempotent), and
 
 ## Features
 
-- **Multi-format ingest**: CSV / TSV / TXT / XLSX / Parquet / JSON / RDS
+- **Multi-format ingest**: CSV / TSV / TXT / XLSX / Parquet / JSON / RDS, plus **Stata `.dta`**, **SPSS `.sav`/`.por`**, and **SAS `.sas7bdat`/`.xpt`** via [`haven`](https://haven.tidyverse.org/) — variable and value labels are preserved and surfaced in Explore, Survey, and Codebook views
 - **Frequency-aware**: declare daily / weekly / monthly / quarterly / yearly
 - **Auto task detection**: regression · binary / multiclass classification · count · proportion · time series
-- **Recipe builder**: missingness handling, one-hot encoding, scaling, lag features, rolling means
+- **🧪 Editorial Data Prep** — magazine-style health report (column profile, leakage scan, skew/missingness grading) with an editable **recipe builder**: drop zero-variance / ID-like / high-missing columns, impute, lump rare categories, derive date features, Yeo-Johnson transform, winsorize, scale, one-hot encode. Optional **AI co-pilot** suggests steps from the column profile only — never raw rows.
+- **🔒 Privacy Audit** — PII pattern scan (email, phone, IBAN, IPv4, postal, credit card) plus EN/DE sensitive-keyword detection, **k-anonymity** on quasi-identifier combos, deterministic pseudonymizer, append-only audit log in SQLite, and a hard **AI egress gate** (`state$privacy_allow_ai`) that blocks any external AI call when toggled off.
+- **📊 Survey & Panel Suite** — declare a [`survey`](https://CRAN.R-project.org/package=survey) design (weights, strata, PSU, FPC), get **weighted descriptives**, Likert detection, weighted crosstabs with `svychisq`, label-aware codebook, and panel handlers (per-wave counts, attrition, balanced/unbalanced detection).
 - **Model registry** (extend in `R/model_registry.R`) — each model has a built-in description shown in the UI:
   - Regression — `lm`, `glmnet` (Lasso/Ridge/Elastic Net), `mgcv::gam`, `ranger`, `xgboost`, **LightGBM** (Py), **CatBoost** (Py), **Keras MLP** (Py)
   - Classification — `glm` logit, penalized logit (`glmnet`), `ranger`, `xgboost`, LightGBM, Keras MLP

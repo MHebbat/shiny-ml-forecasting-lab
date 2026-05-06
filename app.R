@@ -34,11 +34,15 @@ suppressPackageStartupMessages({
 # ---- Source modules ---------------------------------------------------
 source("R/db.R", local = TRUE)
 source("R/utils.R", local = TRUE)
+source("R/recipe_builder.R", local = TRUE)
 source("R/model_registry.R", local = TRUE)
 source("R/python_bridge.R", local = TRUE)
 source("R/ai_analysis.R", local = TRUE)
 source("R/mod_ingest.R", local = TRUE)
 source("R/mod_explore.R", local = TRUE)
+source("R/mod_dataprep.R", local = TRUE)
+source("R/mod_privacy.R", local = TRUE)
+source("R/mod_survey.R", local = TRUE)
 source("R/mod_modellab.R", local = TRUE)
 source("R/mod_predict.R", local = TRUE)
 source("R/mod_dashboard.R", local = TRUE)
@@ -86,32 +90,47 @@ ui <- page_navbar(
     ingest_ui("ingest")
   ),
   nav_panel(
-    "2 · Explore & Prep",
+    "2 · Explore",
     icon = icon("magnifying-glass-chart"),
     explore_ui("explore")
   ),
   nav_panel(
-    "3 · Model Lab",
+    "3 · Data Prep",
+    icon = icon("wand-magic-sparkles"),
+    dataprep_ui("dataprep")
+  ),
+  nav_panel(
+    "4 · Privacy Audit",
+    icon = icon("shield-halved"),
+    privacy_ui("privacy")
+  ),
+  nav_panel(
+    "5 · Survey & Panel",
+    icon = icon("clipboard-list"),
+    survey_ui("survey")
+  ),
+  nav_panel(
+    "6 · Model Lab",
     icon = icon("microscope"),
     modellab_ui("modellab")
   ),
   nav_panel(
-    "4 · Forecast / Predict",
+    "7 · Forecast / Predict",
     icon = icon("chart-line"),
     predict_ui("predict")
   ),
   nav_panel(
-    "5 · Results Dashboard",
+    "8 · Results Dashboard",
     icon = icon("gauge-high"),
     dashboard_ui("dashboard")
   ),
   nav_panel(
-    "6 · Editorial Studio",
+    "9 · Editorial Studio",
     icon = icon("newspaper"),
     studio_ui("studio")
   ),
   nav_panel(
-    "7 · Runs & Compare",
+    "10 · Runs & Compare",
     icon = icon("trophy"),
     runs_ui("runs")
   ),
@@ -136,13 +155,21 @@ server <- function(input, output, session) {
 
   # Shared reactive state passed between modules
   state <- reactiveValues(
-    raw_data    = NULL,   # uploaded data.frame
-    dataset_id  = NULL,   # SQLite id for this dataset
-    meta        = NULL,   # list(frequency, target, task_type, time_col, group_cols)
-    prepped     = NULL,   # post-recipe data
-    recipe      = NULL,   # recipes::recipe object
-    last_model  = NULL,   # most recently trained model object
-    last_run_id = NULL
+    raw_data        = NULL,   # uploaded data.frame
+    dataset_id      = NULL,   # SQLite id for this dataset
+    dataset_name    = NULL,
+    meta            = NULL,   # list(frequency, target, task_type, time_col, group_cols)
+    prepped         = NULL,   # post-recipe data
+    recipe          = NULL,   # recipes::recipe object
+    last_model      = NULL,
+    last_run_id     = NULL,
+    last_params     = NULL,
+    n_train         = NULL,
+    labels          = list(),    # haven var/value labels
+    survey_hints    = list(),    # auto-detected design columns
+    privacy_allow_ai = TRUE,     # AI egress gate
+    prep_log        = list(),    # applied prep steps
+    survey_design   = NULL       # declared survey design
   )
 
   # Show python availability status in navbar
@@ -152,6 +179,9 @@ server <- function(input, output, session) {
 
   ingest_server("ingest", state)
   explore_server("explore", state)
+  dataprep_server("dataprep", state)
+  privacy_server("privacy", state)
+  survey_server("survey", state)
   modellab_server("modellab", state)
   predict_server("predict", state)
   dashboard_server("dashboard", state)
@@ -160,7 +190,7 @@ server <- function(input, output, session) {
 
   # Auto-jump to Results Dashboard whenever a new run finishes
   observeEvent(state$last_run_id, {
-    nav_select("main_nav", "5 · Results Dashboard")
+    nav_select("main_nav", "8 · Results Dashboard")
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 }
 

@@ -9,8 +9,9 @@ ingest_ui <- function(id) {
     card(
       card_header("Upload data"),
       fileInput(ns("file"),
-        "CSV / TSV / TXT / XLSX / Parquet / JSON / RDS",
-        accept = c(".csv",".tsv",".txt",".xlsx",".xls",".parquet",".json",".rds"),
+        "CSV / TSV / TXT / XLSX / Parquet / JSON / RDS / Stata (.dta) / SPSS (.sav .por) / SAS (.sas7bdat .xpt)",
+        accept = c(".csv",".tsv",".txt",".xlsx",".xls",".parquet",".json",".rds",
+                   ".dta",".sav",".por",".sas7bdat",".xpt"),
         width = "100%"),
       hr(),
       strong("Or load a sample dataset"),
@@ -41,14 +42,25 @@ ingest_server <- function(id, state) {
       df <- tryCatch(read_uploaded(input$file$datapath, input$file$name),
                      error = function(e) { flash(conditionMessage(e), "error"); NULL })
       req(df)
+      # Capture variable + value labels (Stata / SPSS / SAS); harmonise haven_labelled cols
+      state$labels <- tryCatch(extract_labels(df), error = function(e) list())
+      df <- tryCatch(harmonize_labelled(df), error = function(e) df)
       state$raw_data <- df
       state$dataset_name <- input$file$name
+      # Auto-detect possible survey design columns
+      state$survey_hints <- tryCatch(
+        detect_survey_columns(df, state$labels),
+        error = function(e) list())
       flash(sprintf("Loaded %s (%s rows × %s cols)",
                     input$file$name, nrow(df), ncol(df)), "message")
     })
 
+    # Helper: reset labels/hints when loading a sample dataset
+    .reset_aux <- function() { state$labels <- list(); state$survey_hints <- list() }
+
     # ---- sample datasets ---------------------------------------------
     observeEvent(input$sample_air, {
+      .reset_aux()
       d <- data.frame(month = seq.Date(as.Date("1949-01-01"),
                                        by = "month", length.out = 144),
                       passengers = as.numeric(AirPassengers))
@@ -56,15 +68,18 @@ ingest_server <- function(id, state) {
       flash("Loaded AirPassengers sample","message")
     })
     observeEvent(input$sample_iris, {
+      .reset_aux()
       state$raw_data <- iris; state$dataset_name <- "iris"
       flash("Loaded Iris sample","message")
     })
     observeEvent(input$sample_mt, {
+      .reset_aux()
       d <- mtcars; d$model <- rownames(mtcars); rownames(d) <- NULL
       state$raw_data <- d; state$dataset_name <- "mtcars"
       flash("Loaded mtcars sample","message")
     })
     observeEvent(input$sample_ins, {
+      .reset_aux()
       set.seed(42); n <- 1000
       d <- data.frame(
         age = sample(18:65, n, TRUE),

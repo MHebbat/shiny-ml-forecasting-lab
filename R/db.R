@@ -77,6 +77,79 @@ db_init <- function() {
       suggestions_json TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )")
+
+  # Data prep reports - profile + applied steps
+  DBI::dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS prep_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dataset_id INTEGER,
+      profile_json TEXT,
+      applied_steps_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )")
+
+  # Privacy audit log - append only
+  DBI::dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS privacy_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dataset_id INTEGER,
+      action TEXT,
+      scope TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )")
+
+  # Survey designs declared per dataset
+  DBI::dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS survey_designs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dataset_id INTEGER UNIQUE,
+      design_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )")
+}
+
+# ---- Prep reports ----------------------------------------------------
+db_save_prep_report <- function(dataset_id, profile_df, applied_steps) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con,
+    "INSERT INTO prep_reports(dataset_id, profile_json, applied_steps_json) VALUES(?,?,?)",
+    params = list(dataset_id %||% NA_integer_,
+                  jsonlite::toJSON(profile_df, auto_unbox = TRUE, na = "null"),
+                  jsonlite::toJSON(applied_steps, auto_unbox = TRUE, na = "null")))
+}
+
+# ---- Privacy log -----------------------------------------------------
+db_log_privacy <- function(dataset_id, action, scope = "") {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con,
+    "INSERT INTO privacy_log(dataset_id, action, scope) VALUES(?,?,?)",
+    params = list(dataset_id %||% NA_integer_,
+                  as.character(action), as.character(scope)))
+}
+
+db_get_privacy_log <- function(limit = 200) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  DBI::dbGetQuery(con,
+    sprintf("SELECT id, dataset_id, action, scope, created_at FROM privacy_log ORDER BY id DESC LIMIT %d", as.integer(limit)))
+}
+
+# ---- Survey designs --------------------------------------------------
+db_save_survey_design <- function(dataset_id, design) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con,
+    "INSERT OR REPLACE INTO survey_designs(dataset_id, design_json) VALUES(?,?)",
+    params = list(dataset_id %||% NA_integer_,
+                  jsonlite::toJSON(design, auto_unbox = TRUE, na = "null")))
+}
+
+db_get_survey_design <- function(dataset_id) {
+  con <- db_con(); on.exit(DBI::dbDisconnect(con))
+  res <- DBI::dbGetQuery(con,
+    "SELECT design_json FROM survey_designs WHERE dataset_id = ?",
+    params = list(dataset_id %||% NA_integer_))
+  if (nrow(res) == 0) NULL
+  else tryCatch(jsonlite::fromJSON(res$design_json[1], simplifyVector = FALSE),
+                 error = function(e) NULL)
 }
 
 # ---- Analyses --------------------------------------------------------

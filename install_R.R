@@ -27,10 +27,11 @@ local({
   needed <- c(
     # Core Shiny
     "shiny", "bslib", "shinyWidgets", "shinycssloaders", "htmltools",
-    # Data IO
-    "DT", "readr", "readxl", "arrow", "jsonlite",
+    # Data IO (incl. Stata/SPSS/SAS via haven, labels via labelled)
+    "DT", "readr", "readxl", "arrow", "jsonlite", "haven", "labelled",
     # Wrangling / viz
     "dplyr", "tidyr", "lubridate", "ggplot2", "plotly",
+    "forcats", "stringr",
     # Persistence
     "DBI", "RSQLite",
     # Modeling - classical
@@ -41,6 +42,10 @@ local({
     "forecast",
     # Tidymodels (used in some workflows)
     "recipes", "yardstick",
+    # Survey / panel analytics
+    "survey", "srvyr",
+    # Privacy / hashing
+    "digest",
     # Python bridge
     "reticulate",
     # HTTP client for AI providers

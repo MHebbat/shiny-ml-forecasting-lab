@@ -219,6 +219,29 @@ build_run_payload <- function(state) {
   )
 }
 
+# ---- Public helpers (used by other modules) -------------------------
+# Returns a list(provider=..., key=...) describing the selected provider.
+ai_pick_provider <- function(provider = "auto") {
+  if (is.null(provider)) provider <- "auto"
+  if (provider == "auto") {
+    if (nzchar(Sys.getenv("OPENAI_API_KEY")))         return(list(provider = "openai"))
+    if (nzchar(Sys.getenv("ANTHROPIC_API_KEY")))      return(list(provider = "anthropic"))
+    if (nzchar(Sys.getenv("PPLX_API_KEY")))           return(list(provider = "perplexity"))
+    return(list(provider = "heuristic"))
+  }
+  list(provider = provider)
+}
+
+# Generic LLM call. Takes the provider list returned by ai_pick_provider
+# and a prompt string. Returns the raw text response or stops with error.
+ai_call <- function(prov, prompt) {
+  switch(prov$provider %||% "heuristic",
+    "openai"     = .call_openai(prompt),
+    "anthropic"  = .call_anthropic(prompt),
+    "perplexity" = .call_perplexity(prompt),
+    stop("No live AI provider available"))
+}
+
 # ---- Public entry point ----------------------------------------------
 run_ai_analysis <- function(state, provider = c("auto","openai","anthropic","perplexity","heuristic")) {
   provider <- match.arg(provider)

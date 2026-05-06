@@ -24,9 +24,12 @@ detect_task_type <- function(y, time_col_present = FALSE) {
 }
 
 # ---- File reading -----------------------------------------------------
+# Supports tabular, columnar and statistical formats. For Stata/SPSS/SAS
+# we keep variable + value labels via the `labelled` package so the
+# survey/codebook tabs can render them.
 read_uploaded <- function(path, name) {
   ext <- tolower(tools::file_ext(name))
-  switch(ext,
+  df <- switch(ext,
     "csv"     = readr::read_csv(path, show_col_types = FALSE),
     "tsv"     = readr::read_tsv(path, show_col_types = FALSE),
     "txt"     = readr::read_delim(path, show_col_types = FALSE),
@@ -35,8 +38,72 @@ read_uploaded <- function(path, name) {
     "parquet" = { req_pkg("arrow");  arrow::read_parquet(path) },
     "json"    = jsonlite::fromJSON(path, flatten = TRUE),
     "rds"     = readRDS(path),
+    "dta"     = { req_pkg("haven"); haven::read_dta(path) },
+    "sav"     = { req_pkg("haven"); haven::read_sav(path) },
+    "por"     = { req_pkg("haven"); haven::read_por(path) },
+    "sas7bdat" = { req_pkg("haven"); haven::read_sas(path) },
+    "xpt"     = { req_pkg("haven"); haven::read_xpt(path) },
     stop(sprintf("Unsupported file extension: .%s", ext))
-  ) |> as.data.frame()
+  )
+  as.data.frame(df)
+}
+
+# ---- Variable & value label helpers (haven / labelled) ---------------
+extract_labels <- function(df) {
+  out <- list(var_labels = list(), value_labels = list())
+  for (nm in names(df)) {
+    col <- df[[nm]]
+    vlab <- attr(col, "label", exact = TRUE)
+    if (!is.null(vlab) && nzchar(vlab)) out$var_labels[[nm]] <- as.character(vlab)
+    val_lab <- attr(col, "labels", exact = TRUE)
+    if (!is.null(val_lab) && length(val_lab) > 0) {
+      out$value_labels[[nm]] <- setNames(as.character(names(val_lab)),
+                                          as.character(unname(val_lab)))
+    }
+  }
+  out
+}
+
+# Convert haven_labelled columns into plain factors / numerics so models
+# don't choke; preserves labels in attributes for the codebook tab.
+harmonize_labelled <- function(df) {
+  for (nm in names(df)) {
+    col <- df[[nm]]
+    if (inherits(col, "haven_labelled")) {
+      val_lab <- attr(col, "labels", exact = TRUE)
+      if (!is.null(val_lab) && length(val_lab) <= 50) {
+        df[[nm]] <- factor(unclass(col),
+                            levels = unname(val_lab),
+                            labels = names(val_lab))
+      } else {
+        df[[nm]] <- as.numeric(unclass(col))
+      }
+      # Re-attach variable label
+      attr(df[[nm]], "label") <- attr(col, "label", exact = TRUE)
+    }
+  }
+  df
+}
+
+# Heuristic detector for survey design columns based on common naming
+# conventions in EN/DE social-science panels (PHF, SOEP, ESS, etc.)
+detect_survey_columns <- function(df, labels = list()) {
+  nm <- tolower(names(df))
+  vlab <- vapply(seq_along(nm), function(i) {
+    l <- labels$var_labels[[names(df)[i]]]
+    if (is.null(l)) "" else tolower(l)
+  }, character(1))
+  hits <- function(needles) {
+    pat <- paste(needles, collapse = "|")
+    grepl(pat, nm) | grepl(pat, vlab)
+  }
+  list(
+    weight  = names(df)[hits(c("weight", "\\bwt\\b", "gewicht", "hochrechnung"))],
+    strata  = names(df)[hits(c("strata", "stratum", "schicht"))],
+    psu     = names(df)[hits(c("psu", "cluster", "primary sampling"))],
+    id      = names(df)[hits(c("^id$", "persnr", "hhnr", "respondent", "caseid"))],
+    wave    = names(df)[hits(c("wave", "welle", "period", "^year$", "\\byr\\b"))]
+  )
 }
 
 req_pkg <- function(pkg) {
