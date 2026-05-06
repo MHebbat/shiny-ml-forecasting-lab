@@ -155,21 +155,26 @@ server <- function(input, output, session) {
 
   # Shared reactive state passed between modules
   state <- reactiveValues(
-    raw_data        = NULL,   # uploaded data.frame
-    dataset_id      = NULL,   # SQLite id for this dataset
+    # ---- Multi-dataset workspace ----
+    datasets        = list(),  # named list keyed by ds_id ("ds_1", "ds_2", ...)
+    active_id       = NULL,    # currently active key in $datasets
+    # ---- Active-dataset shortcuts (mirrored by ingest_server) ----
+    raw_data        = NULL,
+    dataset_id      = NULL,    # SQLite id for the saved dataset
     dataset_name    = NULL,
-    meta            = NULL,   # list(frequency, target, task_type, time_col, group_cols)
-    prepped         = NULL,   # post-recipe data
-    recipe          = NULL,   # recipes::recipe object
+    meta            = NULL,    # list(frequency, target, task_type, time_col, group_cols)
+    labels          = list(),  # haven var/value labels
+    survey_hints    = list(),  # auto-detected design columns
+    # ---- Pipeline / model artifacts ----
+    prepped         = NULL,    # post-recipe data
+    recipe          = NULL,    # recipes::recipe object
     last_model      = NULL,
     last_run_id     = NULL,
     last_params     = NULL,
     n_train         = NULL,
-    labels          = list(),    # haven var/value labels
-    survey_hints    = list(),    # auto-detected design columns
-    privacy_allow_ai = TRUE,     # AI egress gate
-    prep_log        = list(),    # applied prep steps
-    survey_design   = NULL       # declared survey design
+    privacy_allow_ai = TRUE,   # AI egress gate
+    prep_log        = list(),  # applied prep steps
+    survey_design   = NULL     # declared survey design
   )
 
   # Show python availability status in navbar
