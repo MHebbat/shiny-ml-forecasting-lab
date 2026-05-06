@@ -182,7 +182,7 @@ studio_server <- function(id, state) {
         # Use first non-empty line as a pull-quote
         lines <- strsplit(analysis$analysis_md, "\n", fixed = TRUE)[[1]]
         first <- head(Filter(function(x) nchar(trimws(x)) > 0, lines), 1)
-        if (length(first) == 0) "" else gsub("^[#>*\\- ]+", "", first[[1]])
+        if (length(first) == 0) "" else .safe_regex("^[-#>* ]+", first[[1]])
       } else ""
 
       # ----- Layouts -----

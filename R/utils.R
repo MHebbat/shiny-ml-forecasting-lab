@@ -176,6 +176,42 @@ req_pkg <- function(pkg) {
     stop(sprintf("Package '%s' is required. install.packages('%s')", pkg, pkg))
 }
 
+# ---- Defensive regex wrapper ----------------------------------------
+# Use whenever a pattern touches user-controlled text (markdown stripping,
+# manuscript renderers, manifest helpers). A malformed character-class
+# in any one call must never crash the whole tab.
+.safe_regex <- function(pattern, x, fn = gsub, replacement = "", perl = TRUE, ...) {
+  tryCatch({
+    if (identical(fn, gsub) || identical(fn, sub)) {
+      fn(pattern, replacement, x, perl = perl, ...)
+    } else {
+      fn(pattern, x, perl = perl, ...)
+    }
+  }, error = function(e) {
+    warning(sprintf("Regex failed for pattern '%s': %s",
+                    pattern, conditionMessage(e)))
+    if (identical(fn, grepl)) rep(FALSE, length(x)) else x
+  })
+}
+
+# ---- Friendly dispatcher wrapper -------------------------------------
+# Wraps a fitter call so that the original `.assert_*_shapes` /
+# user-readable message is surfaced verbatim instead of R's opaque
+# "arguments imply differing number of rows" error.
+safe_fit_dispatch <- function(fn, ...) {
+  tryCatch(fn(...), error = function(e) {
+    msg <- conditionMessage(e)
+    if (grepl("arguments imply differing number of rows", msg, fixed = TRUE)) {
+      stop("Cannot train: training inputs ended up with mismatched lengths ",
+           "(shape guard not reached). ",
+           "This usually means Data Prep stripped a column the fitter expected. ",
+           "Try the Recipe Builder and confirm the target/predictor list.",
+           call. = FALSE)
+    }
+    stop(msg, call. = FALSE)
+  })
+}
+
 # ---- Training-shape guards -------------------------------------------
 # Called from the top of each fit_* branch to surface clear errors when
 # upstream Data Prep / validation-splitting produced an empty or

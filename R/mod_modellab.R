@@ -926,7 +926,7 @@ modellab_server <- function(id, state) {
           setTimeLimit(elapsed = budget_secs, transient = TRUE)
           on.exit(setTimeLimit(elapsed = Inf), add = TRUE)
         }
-        fit <- m$fn(train_df, target, params, time_col = tcol)
+        fit <- safe_fit_dispatch(m$fn, train_df, target, params, time_col = tcol)
 
         # Time series: predict horizon
         if (task == "time_series") {
@@ -1022,6 +1022,7 @@ modellab_server <- function(id, state) {
         }
       }
 
+      out$train_df <- train_df
       state$last_model <- out
       state$last_params <- params
       state$n_train <- nrow(train_df)
@@ -1156,6 +1157,79 @@ modellab_server <- function(id, state) {
         return(mi_section)
       }
       best_iter <- state$last_model$fit$model$best_iteration %||% NULL
+
+      # ---- Predictor analysis sub-section ---------------------------
+      pa_section <- local({
+        fit <- state$last_model$fit
+        if (is.null(fit)) return(NULL)
+        df  <- state$last_model$train_df %||% state$prepped %||% NULL
+        target <- state$meta$target
+        if (is.null(df) || is.null(target) || !target %in% names(df)) return(NULL)
+        imp <- tryCatch(predictor_importance(fit, df, target),
+                         error = function(e) NULL)
+        imp_block <- if (is.null(imp) || nrow(imp) == 0L) {
+          tags$div(class = "alert alert-secondary",
+                   "Predictor importance not available for this model.")
+        } else {
+          imp_show <- imp[order(-imp$importance), , drop = FALSE]
+          imp_show <- utils::head(imp_show, 20)
+          imp_show$importance <- round(imp_show$importance, 4)
+          DT::renderDT(DT::datatable(imp_show,
+            options = list(dom = "tip", pageLength = 10),
+            rownames = FALSE, class = "compact stripe"))()
+        }
+        # PDP for top-6 importance features (or first 6 numeric preds)
+        top_feats <- if (!is.null(imp) && nrow(imp) > 0L)
+                       utils::head(imp$feature, 6) else
+                       utils::head(setdiff(names(df), target), 6)
+        pdp_list <- tryCatch(partial_dependence(fit, df, target, top_feats),
+                              error = function(e) list())
+        pdp_block <- if (length(pdp_list) == 0L) {
+          tags$div(class = "alert alert-secondary",
+                   "Partial dependence not available (no compatible predict path).")
+        } else {
+          plotly::renderPlotly({
+            plt <- plotly::plot_ly()
+            cols <- c("#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b")
+            i <- 0L
+            for (f in names(pdp_list)) {
+              i <- i + 1L
+              dat <- pdp_list[[f]]
+              if (is.null(dat) || nrow(dat) == 0L) next
+              plt <- plotly::add_lines(plt, x = dat$x, y = dat$yhat,
+                name = f, line = list(color = cols[((i-1L) %% 6) + 1L]))
+            }
+            plotly::layout(plt, height = 320,
+              xaxis = list(title = "Feature value"),
+              yaxis = list(title = "Predicted target"),
+              legend = list(orientation = "h"))
+          })()
+        }
+        tags$div(class = "studio-intro",
+          tags$div(class = "studio-page",
+            tags$div(class = "studio-kicker", "PREDICTOR ANALYSIS"),
+            tags$p(class = "muted", style = "margin-top:6px;",
+              tags$b("Methodological notice. "),
+              "Importance and partial-dependence plots describe the FITTED model — not causal effects. ",
+              "For causal claims, declare a DAG and use a method explicitly designed for that question. ",
+              "See ", tags$code("docs/causal_inference.md"), "."),
+            tags$div(class = "studio-kicker",
+                      style = "margin-top:8px;", "TOP PREDICTORS"),
+            imp_block,
+            tags$div(class = "studio-kicker",
+                      style = "margin-top:8px;", "PARTIAL DEPENDENCE"),
+            pdp_block,
+            tags$details(style = "margin-top:8px;",
+              tags$summary("Causal scaffolds (validate identification first)"),
+              tags$div(style = "margin-top:6px;",
+                tags$p(class = "muted",
+                  "These are scaffolds. They expose did_2x2(), ipw_ps(), iv_2sls(), and ",
+                  "robust_coef_table() in R/causal_helpers.R. Do not run them blind: ",
+                  "validate parallel-trends, overlap, and instrument relevance first. ",
+                  "Documentation: ", tags$code("docs/causal_inference.md"), ".")))
+          ))
+      })
+
       tagList(
       tags$div(class = "studio-intro",
         tags$div(class = "studio-page",
@@ -1198,6 +1272,7 @@ modellab_server <- function(id, state) {
           }
         )
       ),
+      pa_section,
       mi_section
       )
     })

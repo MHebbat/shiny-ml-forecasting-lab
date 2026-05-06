@@ -595,19 +595,105 @@ fit_tbats <- function(df, target, params, time_col = NULL) {
        feat_imp = NULL)
 }
 
-# Prophet (optional)
+# Prophet (optional) ---------------------------------------------------
+# `prophet_prepare` is the pure data-prep wrapper. It is unit-tested (no
+# prophet dependency required) and produces the canonical (ds, y[, cap,
+# floor]) frame Prophet needs:
+#   - rename time_col -> ds (Date), target -> y (numeric)
+#   - parse with safe_as_date (lubridate fallback)
+#   - drop NA rows on ds or y
+#   - dedupe + order by ds (Prophet refuses duplicates)
+#   - for growth = "logistic": require non-NA cap (and optional floor)
+#     either as user-supplied numeric scalars or column names in df
+.assert_prophet_shapes <- function(d, model_label = "Prophet") {
+  if (!is.data.frame(d) || !all(c("ds","y") %in% names(d)))
+    stop(sprintf("Cannot train %s: expected a data.frame with columns 'ds' and 'y', got %s.",
+                 model_label,
+                 paste(names(d), collapse = ", ")), call. = FALSE)
+  if (nrow(d) == 0L)
+    stop(sprintf("Cannot train %s: prepared frame has 0 rows after NA / duplicate filtering.",
+                 model_label), call. = FALSE)
+  if (!inherits(d$ds, c("Date","POSIXt")))
+    stop(sprintf("Cannot train %s: 'ds' must be Date or POSIXt, got %s.",
+                 model_label, class(d$ds)[1]), call. = FALSE)
+  if (anyDuplicated(d$ds) > 0)
+    stop(sprintf("Cannot train %s: duplicate timestamps in 'ds' after dedup — internal pipeline bug.",
+                 model_label), call. = FALSE)
+  if (is.unsorted(d$ds))
+    stop(sprintf("Cannot train %s: 'ds' is not sorted ascending — internal pipeline bug.",
+                 model_label), call. = FALSE)
+  invisible(TRUE)
+}
+
+prophet_prepare <- function(df, time_col, target,
+                            growth = c("linear","logistic","flat"),
+                            cap = NULL, floor = NULL) {
+  growth <- match.arg(growth)
+  if (is.null(time_col) || !nzchar(time_col))
+    stop("Prophet requires a time column.", call. = FALSE)
+  if (!time_col %in% names(df))
+    stop(sprintf("Prophet: time column '%s' not found in data.", time_col),
+         call. = FALSE)
+  if (!target %in% names(df))
+    stop(sprintf("Prophet: target column '%s' not found in data.", target),
+         call. = FALSE)
+  ds <- safe_as_date(df[[time_col]], column_name = time_col)
+  y  <- suppressWarnings(as.numeric(df[[target]]))
+  if (all(is.na(ds)))
+    stop(sprintf("Prophet: column '%s' could not be parsed as a date. ",
+                 time_col),
+         "Use Data Prep -> parse_datetime to declare its format.",
+         call. = FALSE)
+  d <- data.frame(ds = ds, y = y, stringsAsFactors = FALSE)
+  ok <- !is.na(d$ds) & !is.na(d$y)
+  d  <- d[ok, , drop = FALSE]
+  if (nrow(d) == 0L)
+    stop("Prophet: 0 rows remain after dropping NA in time/target columns.",
+         call. = FALSE)
+  d <- d[!duplicated(d$ds), , drop = FALSE]
+  d <- d[order(d$ds), , drop = FALSE]
+  if (growth == "logistic") {
+    cap_vec <- if (is.character(cap) && length(cap) == 1L && cap %in% names(df))
+                 suppressWarnings(as.numeric(df[[cap]]))[ok][!duplicated(ds[ok])]
+               else if (is.numeric(cap) && length(cap) == 1L)
+                 rep(cap, nrow(d))
+               else NULL
+    if (is.null(cap_vec) || any(!is.finite(cap_vec)))
+      stop("Prophet logistic growth requires a non-NA cap (numeric scalar or column).",
+           call. = FALSE)
+    d$cap <- cap_vec[order(d$ds)] %||% cap_vec
+    floor_vec <- if (is.character(floor) && length(floor) == 1L && floor %in% names(df))
+                   suppressWarnings(as.numeric(df[[floor]]))[ok][!duplicated(ds[ok])]
+                 else if (is.numeric(floor) && length(floor) == 1L)
+                   rep(floor, nrow(d))
+                 else rep(0, nrow(d))
+    d$floor <- floor_vec
+  }
+  rownames(d) <- NULL
+  .assert_prophet_shapes(d)
+  d
+}
+
 fit_prophet <- function(df, target, params, time_col = NULL) {
   .assert_train_shapes(df[[target]], df, "Prophet")
   if (!.has("prophet"))
     stop("Prophet not installed - run install.packages('prophet') to enable")
-  if (is.null(time_col)) stop("Prophet requires a time column")
-  d <- data.frame(
-    ds = safe_as_date(df[[time_col]], column_name = time_col),
-    y  = as.numeric(df[[target]]))
-  if (all(is.na(d$ds)))
-    stop(sprintf("Prophet: column '%s' could not be parsed as a date. ",
-                 time_col),
-         "Use Data Prep -> parse_datetime to declare its format.")
+
+  growth <- params$growth %||% "linear"
+  cap_in   <- params$prophet_cap   %||% params$cap
+  floor_in <- params$prophet_floor %||% params$floor
+  cap_arg <- if (!is.null(cap_in) && nzchar(as.character(cap_in)))
+               suppressWarnings(as.numeric(cap_in)) %||% as.character(cap_in)
+             else if (growth == "logistic")
+               { mx <- suppressWarnings(max(as.numeric(df[[target]]), na.rm = TRUE))
+                 if (is.finite(mx) && mx > 0) mx * 1.5 else 1 }
+             else NULL
+  floor_arg <- if (!is.null(floor_in) && nzchar(as.character(floor_in)))
+                 suppressWarnings(as.numeric(floor_in)) %||% as.character(floor_in)
+               else if (growth == "logistic") 0 else NULL
+
+  d <- prophet_prepare(df, time_col = time_col, target = target,
+                       growth = growth, cap = cap_arg, floor = floor_arg)
 
   yearly <- .parse_auto_lgl(params$yearly %||% "auto")
   weekly <- .parse_auto_lgl(params$weekly %||% "auto")
@@ -615,14 +701,6 @@ fit_prophet <- function(df, target, params, time_col = NULL) {
   yearly_arg <- if (is.na(yearly)) "auto" else yearly
   weekly_arg <- if (is.na(weekly)) "auto" else weekly
   daily_arg  <- if (is.na(daily))  "auto" else daily
-
-  growth <- params$growth %||% "linear"
-  if (growth == "logistic") {
-    cap <- max(d$y, na.rm = TRUE)
-    if (!is.finite(cap) || cap == 0) cap <- 1
-    d$cap <- cap * 1.5
-    d$floor <- 0
-  }
 
   m <- prophet::prophet(
     d,
@@ -642,12 +720,285 @@ fit_prophet <- function(df, target, params, time_col = NULL) {
                                                freq = params$prophet_freq %||% "month")
          if (growth == "logistic") {
            fut$cap   <- max(d$cap, na.rm = TRUE)
-           fut$floor <- 0
+           fut$floor <- if ("floor" %in% names(d)) min(d$floor, na.rm = TRUE) else 0
          }
          fc <- predict(m, fut)
-         tail(data.frame(predicted = fc$yhat, lower = fc$yhat_lower, upper = fc$yhat_upper), h)
+         tail(data.frame(predicted = fc$yhat,
+                         lower = fc$yhat_lower,
+                         upper = fc$yhat_upper), h)
        },
        feat_imp = NULL)
+}
+
+# =====================================================================
+# Bundesbank-style time-series additions
+# =====================================================================
+# Univariate baselines (forecast::naive / snaive / rwf / meanf / thetaf)
+# and STL+ARIMA (forecast::stlm). All require only the `forecast`
+# package which is already a baseline dep for ARIMA / ETS / TBATS.
+
+.ts_helper_freq <- function(params, n) {
+  freq <- suppressWarnings(as.numeric(params$ts_frequency %||% 12))
+  if (!is.finite(freq) || freq < 1) freq <- 1
+  if (freq >= n) freq <- max(1, floor(n / 2))
+  freq
+}
+.ts_helper_y <- function(df, target, params) {
+  y <- as.numeric(df[[target]])
+  freq <- .ts_helper_freq(params, length(y))
+  ts(y, frequency = freq)
+}
+.ts_predict_df <- function(fc) {
+  lo <- if (!is.null(fc$lower)) as.numeric(fc$lower[, ncol(fc$lower)]) else NA_real_
+  hi <- if (!is.null(fc$upper)) as.numeric(fc$upper[, ncol(fc$upper)]) else NA_real_
+  data.frame(predicted = as.numeric(fc$mean), lower = lo, upper = hi)
+}
+
+# Naive (last value carried forward)
+fit_naive <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Naive")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  ts_y <- .ts_helper_y(df, target, params)
+  list(model = list(engine = "naive", y = ts_y),
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::naive(ts_y, h = h)),
+       feat_imp = NULL)
+}
+fit_snaive <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Seasonal Naive")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  ts_y <- .ts_helper_y(df, target, params)
+  list(model = list(engine = "snaive", y = ts_y),
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::snaive(ts_y, h = h)),
+       feat_imp = NULL)
+}
+fit_rwf_drift <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Random Walk + Drift")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  ts_y <- .ts_helper_y(df, target, params)
+  list(model = list(engine = "rwf", y = ts_y),
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::rwf(ts_y, h = h, drift = TRUE)),
+       feat_imp = NULL)
+}
+fit_meanf <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Mean")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  ts_y <- .ts_helper_y(df, target, params)
+  list(model = list(engine = "meanf", y = ts_y),
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::meanf(ts_y, h = h)),
+       feat_imp = NULL)
+}
+fit_theta <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "Theta")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  ts_y <- .ts_helper_y(df, target, params)
+  list(model = list(engine = "thetaf", y = ts_y),
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::thetaf(ts_y, h = h)),
+       feat_imp = NULL)
+}
+
+# STL decomposition + ARIMA on the seasonally-adjusted series
+fit_stl_arima <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "STL+ARIMA")
+  if (!.has("forecast")) stop("Install 'forecast'")
+  y <- as.numeric(df[[target]])
+  freq <- .ts_helper_freq(params, length(y))
+  if (freq < 2)
+    stop("STL+ARIMA requires a seasonal series (ts_frequency >= 2). ",
+         "For non-seasonal series use ARIMA directly.", call. = FALSE)
+  ts_y <- ts(y, frequency = freq)
+  s_window <- params$s_window %||% "periodic"
+  s_window <- if (identical(s_window, "periodic")) "periodic"
+              else suppressWarnings(as.integer(s_window))
+  m <- forecast::stlm(ts_y, s.window = s_window, method = "arima")
+  list(model = m,
+       predict = function(newdata = NULL, h = 12)
+         .ts_predict_df(forecast::forecast(m, h = h)),
+       feat_imp = NULL)
+}
+
+# =====================================================================
+# Multivariate / structural — VAR, VECM, BVAR, DFM
+# =====================================================================
+.ts_select_predictors <- function(df, target, time_col) {
+  cands <- setdiff(names(df), c(target, time_col))
+  num_ok <- vapply(cands, function(nm) is.numeric(df[[nm]]), logical(1))
+  cands[num_ok]
+}
+
+fit_var <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "VAR")
+  if (!.has("vars")) stop("Install 'vars' to enable VAR (install.packages('vars'))")
+  preds <- .ts_select_predictors(df, target, time_col)
+  if (length(preds) < 1L)
+    stop("VAR requires at least 1 numeric predictor in addition to the target. ",
+         "Add covariates in Data Prep or pick a univariate model.",
+         call. = FALSE)
+  Y <- as.matrix(df[, c(target, preds), drop = FALSE])
+  Y <- apply(Y, 2, as.numeric)
+  Y <- Y[stats::complete.cases(Y), , drop = FALSE]
+  if (nrow(Y) < 10L)
+    stop("VAR: fewer than 10 complete rows after dropping NAs.", call. = FALSE)
+  p_in <- params$var_p %||% "auto"
+  ic   <- params$var_ic %||% "AIC"
+  type <- params$var_type %||% "const"
+  if (identical(tolower(as.character(p_in)), "auto") || !nzchar(as.character(p_in))) {
+    sel <- vars::VARselect(Y, lag.max = as.integer(params$var_lag_max %||% 8),
+                           type = type)
+    p_use <- as.integer(sel$selection[paste0(ic, "(n)")])
+    if (!is.finite(p_use) || p_use < 1) p_use <- 1
+  } else {
+    p_use <- max(1L, as.integer(p_in))
+  }
+  m <- vars::VAR(Y, p = p_use, type = type)
+  list(model = m,
+       predict = function(newdata = NULL, h = 12) {
+         fc <- predict(m, n.ahead = h, ci = 0.95)
+         t_fc <- fc$fcst[[target]]
+         data.frame(predicted = as.numeric(t_fc[, "fcst"]),
+                    lower = as.numeric(t_fc[, "lower"]),
+                    upper = as.numeric(t_fc[, "upper"]))
+       },
+       feat_imp = NULL,
+       diagnostics = list(lag = p_use, type = type, ic = ic, vars = preds))
+}
+
+fit_vecm <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "VECM")
+  if (!.has("urca")) stop("Install 'urca' to enable VECM (install.packages('urca'))")
+  if (!.has("vars")) stop("Install 'vars' to enable VECM (install.packages('vars'))")
+  preds <- .ts_select_predictors(df, target, time_col)
+  if (length(preds) < 1L)
+    stop("VECM requires at least 1 numeric predictor.", call. = FALSE)
+  Y <- as.matrix(df[, c(target, preds), drop = FALSE])
+  Y <- apply(Y, 2, as.numeric)
+  Y <- Y[stats::complete.cases(Y), , drop = FALSE]
+  if (nrow(Y) < 15L)
+    stop("VECM: fewer than 15 complete rows after dropping NAs.", call. = FALSE)
+  K <- as.integer(params$vecm_K %||% 2)
+  ecdet <- params$vecm_ecdet %||% "const"
+  type  <- params$vecm_type  %||% "trace"
+  ca <- urca::ca.jo(Y, type = type, ecdet = ecdet, K = max(2L, K))
+  r <- as.integer(params$vecm_r %||% 1)
+  m <- vars::vec2var(ca, r = max(1L, r))
+  list(model = m,
+       predict = function(newdata = NULL, h = 12) {
+         fc <- predict(m, n.ahead = h, ci = 0.95)
+         t_fc <- fc$fcst[[target]]
+         data.frame(predicted = as.numeric(t_fc[, "fcst"]),
+                    lower = as.numeric(t_fc[, "lower"]),
+                    upper = as.numeric(t_fc[, "upper"]))
+       },
+       feat_imp = NULL,
+       diagnostics = list(K = K, ecdet = ecdet, type = type, r = r,
+                          vars = preds))
+}
+
+fit_bvar <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "BVAR")
+  if (!.has("BVAR")) stop("Install 'BVAR' to enable BVAR (install.packages('BVAR'))")
+  preds <- .ts_select_predictors(df, target, time_col)
+  if (length(preds) < 1L)
+    stop("BVAR requires at least 1 numeric predictor.", call. = FALSE)
+  Y <- as.matrix(df[, c(target, preds), drop = FALSE])
+  Y <- apply(Y, 2, as.numeric)
+  Y <- Y[stats::complete.cases(Y), , drop = FALSE]
+  if (nrow(Y) < 15L)
+    stop("BVAR: fewer than 15 complete rows after dropping NAs.", call. = FALSE)
+  lags  <- max(1L, as.integer(params$bvar_lags  %||% 4))
+  draws <- max(50L, as.integer(params$bvar_draws %||% 1000))
+  burn  <- max(10L, as.integer(params$bvar_burn  %||% 500))
+  lambda <- suppressWarnings(as.numeric(params$bvar_lambda %||% 0.2))
+  prior <- BVAR::bv_priors(
+    mn = BVAR::bv_minnesota(lambda = BVAR::bv_lambda(mode = lambda)))
+  m <- BVAR::bvar(Y, lags = lags, n_draw = draws, n_burn = burn,
+                  priors = prior, verbose = FALSE)
+  list(model = m,
+       predict = function(newdata = NULL, h = 12) {
+         pr <- predict(m, horizon = h, conf_bands = c(0.025, 0.5, 0.975))
+         q <- pr$quants
+         t_idx <- which(dimnames(q)[[3]] == target)[1]
+         if (is.na(t_idx)) t_idx <- 1L
+         data.frame(predicted = as.numeric(q[2, , t_idx]),
+                    lower = as.numeric(q[1, , t_idx]),
+                    upper = as.numeric(q[3, , t_idx]))
+       },
+       feat_imp = NULL,
+       diagnostics = list(lags = lags, draws = draws,
+                          lambda = lambda, vars = preds))
+}
+
+fit_dfm <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "DFM")
+  if (!.has("dfms")) stop("Install 'dfms' to enable Dynamic Factor Model (install.packages('dfms'))")
+  preds <- .ts_select_predictors(df, target, time_col)
+  if (length(preds) < 1L)
+    stop("DFM requires at least 1 numeric predictor.", call. = FALSE)
+  X <- as.matrix(df[, c(target, preds), drop = FALSE])
+  X <- apply(X, 2, as.numeric)
+  X <- X[stats::complete.cases(X), , drop = FALSE]
+  if (nrow(X) < 20L)
+    stop("DFM: fewer than 20 complete rows after dropping NAs.", call. = FALSE)
+  r <- max(1L, as.integer(params$dfm_r %||% 2))
+  p <- max(1L, as.integer(params$dfm_p %||% 1))
+  em_iter <- max(1L, as.integer(params$dfm_em_max_iter %||% 100))
+  m <- dfms::DFM(X, r = r, p = p, em.method = "DGR", max.iter = em_iter)
+  list(model = m,
+       predict = function(newdata = NULL, h = 12) {
+         pr <- predict(m, h = h)
+         x_fc <- pr$X_fcst
+         data.frame(predicted = as.numeric(x_fc[, target]),
+                    lower = NA_real_, upper = NA_real_)
+       },
+       feat_imp = NULL,
+       diagnostics = list(r = r, p = p, em_iter = em_iter, vars = preds))
+}
+
+# =====================================================================
+# Mixed-frequency / nowcasting — MIDAS
+# =====================================================================
+fit_midas <- function(df, target, params, time_col = NULL) {
+  .assert_train_shapes(df[[target]], df, "MIDAS")
+  if (!.has("midasr")) stop("Install 'midasr' to enable MIDAS (install.packages('midasr'))")
+  preds <- .ts_select_predictors(df, target, time_col)
+  if (length(preds) < 1L)
+    stop("MIDAS requires at least 1 numeric high-frequency predictor.",
+         call. = FALSE)
+  y <- as.numeric(df[[target]])
+  ok <- stats::complete.cases(df[, c(target, preds), drop = FALSE])
+  y <- y[ok]
+  if (length(y) < 10L)
+    stop("MIDAS: fewer than 10 complete rows after dropping NAs.", call. = FALSE)
+  high_lags <- max(1L, as.integer(params$midas_high_lags %||% 4))
+  poly      <- params$midas_poly %||% "almonp"
+  start_vals <- if (poly == "almonp") c(1, -0.5) else c(1, 1, -0.5)
+  fmla_rhs <- paste(sprintf("midasr::fmls(%s, %d, 1, midasr::%s)",
+                            preds[1], high_lags, poly),
+                    collapse = " + ")
+  fmla <- stats::as.formula(sprintf("y ~ %s", fmla_rhs))
+  data_list <- list(y = y, x = as.numeric(df[[preds[1]]])[ok])
+  names(data_list)[2] <- preds[1]
+  m <- tryCatch(
+    midasr::midas_r(fmla, data = data_list,
+                    start = setNames(list(start_vals), preds[1])),
+    error = function(e)
+      stop("MIDAS fit failed: ", conditionMessage(e), call. = FALSE))
+  list(model = m,
+       predict = function(newdata = NULL, h = 12) {
+         fc <- tryCatch(forecast::forecast(m, h = h),
+                        error = function(e)
+                          list(mean = rep(NA_real_, h),
+                               lower = matrix(NA_real_, h, 2),
+                               upper = matrix(NA_real_, h, 2)))
+         .ts_predict_df(fc)
+       },
+       feat_imp = NULL,
+       diagnostics = list(high_lags = high_lags, poly = poly,
+                          predictor = preds[1]))
 }
 
 # ---- Python-backed wrappers -------------------------------------------
@@ -1528,6 +1879,194 @@ MODELS <- list(
                 choices = c("auto", "TRUE", "FALSE"),
                 description = "Damp the trend component."))),
 
+  # ---- Time series — univariate baselines ---------------------------
+  naive = list(id = "naive", label = "Naive (last value)", engine = "R",
+            task_types = c("time_series"), fn = fit_naive,
+            available = function() avail_pkg("forecast"),
+            description = "Carry-forward forecast: y_{t+h} = y_t. Benchmark.",
+            best_for = c("benchmark / sanity check",
+                         "very short horizons on noisy series"),
+            avoid_when = c("strong trend or seasonality (use snaive / drift / ETS)"),
+            reference_url = "https://otexts.com/fpp3/simple-methods.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 1, 365, 1,
+                description = "Seasonal period; 12=monthly, 4=quarterly, 1=non-seasonal."))),
+  snaive = list(id = "snaive", label = "Seasonal Naive", engine = "R",
+            task_types = c("time_series"), fn = fit_snaive,
+            available = function() avail_pkg("forecast"),
+            description = "Forecast = the value m steps earlier (m = seasonal period).",
+            best_for = c("clearly seasonal data with a stable seasonal pattern",
+                         "benchmark for seasonal series"),
+            avoid_when = c("no seasonality (use naive)"),
+            reference_url = "https://otexts.com/fpp3/simple-methods.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 1, 365, 1,
+                description = "Seasonal period; must be >= 2 for snaive."))),
+  rwf_drift = list(id = "rwf_drift", label = "Random Walk + Drift", engine = "R",
+            task_types = c("time_series"), fn = fit_rwf_drift,
+            available = function() avail_pkg("forecast"),
+            description = "Random walk with a constant per-step drift.",
+            best_for = c("series with a stable linear trend"),
+            avoid_when = c("strong seasonality (use ETS / SARIMA)"),
+            reference_url = "https://otexts.com/fpp3/simple-methods.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 1, 365, 1,
+                description = "Seasonal period."))),
+  meanf = list(id = "meanf", label = "Mean", engine = "R",
+            task_types = c("time_series"), fn = fit_meanf,
+            available = function() avail_pkg("forecast"),
+            description = "Forecast = mean of the training series. Hardest baseline to beat on truly stationary noise.",
+            best_for = c("stationary, mean-reverting series", "naive benchmark"),
+            avoid_when = c("trended or seasonal data"),
+            reference_url = "https://otexts.com/fpp3/simple-methods.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 1, 365, 1,
+                description = "Seasonal period."))),
+  theta = list(id = "theta", label = "Theta method", engine = "R",
+            task_types = c("time_series"), fn = fit_theta,
+            available = function() avail_pkg("forecast"),
+            description = "Theta method (Assimakopoulos & Nikolopoulos 2000). Strong M-competition baseline; equivalent to SES with drift in the standard form.",
+            best_for = c("automatic forecasting on heterogeneous portfolios of series",
+                         "M3 / M4-style benchmarks"),
+            avoid_when = c("multi-seasonal or strongly multivariate data"),
+            reference_url = "https://otexts.com/fpp3/forecasting-methods.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 1, 365, 1,
+                description = "Seasonal period."))),
+  stl_arima = list(id = "stl_arima", label = "STL + ARIMA", engine = "R",
+            task_types = c("time_series"), fn = fit_stl_arima,
+            available = function() avail_pkg("forecast"),
+            description = "STL decomposes into seasonal + trend + remainder; ARIMA is fit on the seasonally-adjusted series and the seasonal component is added back.",
+            best_for = c("monthly / quarterly series with stable seasonality",
+                         "central-bank monthly indicators"),
+            avoid_when = c("no seasonal pattern (use ARIMA directly)",
+                          "multi-seasonal series (use TBATS)"),
+            reference_url = "https://otexts.com/fpp3/stlf.html",
+            dependencies = c("R: forecast"),
+            params = list(
+              P("ts_frequency", "Series frequency (m)", "numeric", 12, 2, 365, 1,
+                description = "Seasonal period; STL requires m >= 2."),
+              P("s_window", "Seasonal window", "text", "periodic",
+                description = "'periodic' or an odd integer >= 7."))),
+
+  # ---- Time series — multivariate / structural ----------------------
+  var = list(id = "var", label = "VAR (Vector Autoregression)", engine = "R",
+            task_types = c("time_series","regression"),
+            fn = fit_var,
+            available = function() avail_pkg("vars",
+              hint = "install.packages('vars')"),
+            description = paste(
+              "Vector Autoregression: each variable is regressed on lags of itself and every other variable.",
+              "Workhorse model in macro forecasting."),
+            best_for = c("small systems of co-evolving macro indicators",
+                         "impulse-response analysis"),
+            avoid_when = c("very high-dimensional systems (use BVAR / DFM)",
+                          "strongly nonlinear dynamics"),
+            reference_url = "https://CRAN.R-project.org/package=vars",
+            dependencies = c("R: vars"),
+            params = list(
+              P("var_p", "Lag order p", "text", "auto",
+                description = "Integer or 'auto' to pick by VARselect()."),
+              P("var_lag_max", "Maximum lag for selection", "integer", 8, 1, 24, 1,
+                description = "Upper bound when var_p='auto'."),
+              P("var_ic", "Selection criterion", "select", "AIC",
+                choices = c("AIC","HQ","SC","FPE"),
+                description = "Information criterion for VARselect."),
+              P("var_type", "Deterministic terms", "select", "const",
+                choices = c("const","trend","both","none"),
+                description = "Constant / trend in the VAR equations."))),
+  vecm = list(id = "vecm", label = "VECM (Vector Error Correction)", engine = "R",
+            task_types = c("time_series"), fn = fit_vecm,
+            available = function()
+              if (.has("urca") && .has("vars")) avail_ok()
+              else list(ok = FALSE,
+                        msg = "VECM requires both 'urca' and 'vars'. install.packages(c('urca','vars'))"),
+            description = "Vector Error Correction Model — Johansen's framework for cointegrated systems.",
+            best_for = c("cointegrated macro variables (e.g. GDP and consumption)",
+                         "long-run equilibrium analysis"),
+            avoid_when = c("variables are not cointegrated (use VAR in differences)"),
+            reference_url = "https://CRAN.R-project.org/package=urca",
+            dependencies = c("R: urca", "R: vars"),
+            params = list(
+              P("vecm_K", "Lag order K", "integer", 2, 2, 12, 1,
+                description = "Number of lags in the VAR before differencing."),
+              P("vecm_r", "Cointegrating rank r", "integer", 1, 1, 5, 1,
+                description = "Number of cointegrating relations."),
+              P("vecm_ecdet", "Deterministic term", "select", "const",
+                choices = c("none","const","trend"),
+                description = "Inclusion of intercept / trend in cointegrating equation."),
+              P("vecm_type", "Test type", "select", "trace",
+                choices = c("trace","eigen"),
+                description = "Johansen test variant for ca.jo."))),
+  bvar = list(id = "bvar", label = "BVAR (Bayesian VAR)", engine = "R",
+            task_types = c("time_series","regression"), fn = fit_bvar,
+            available = function() avail_pkg("BVAR",
+              hint = "install.packages('BVAR')"),
+            description = paste(
+              "Bayesian Vector Autoregression with a Minnesota / Litterman prior.",
+              "Standard tool at central banks (Bańbura, Giannone & Reichlin 2010)."),
+            best_for = c("medium-sized macro systems where shrinkage helps",
+                         "out-of-sample density forecasting"),
+            avoid_when = c("very small or single-series problems",
+                          "strongly nonlinear dynamics"),
+            reference_url = "https://CRAN.R-project.org/package=BVAR",
+            dependencies = c("R: BVAR"),
+            params = list(
+              P("bvar_lags", "Lags", "integer", 4, 1, 12, 1,
+                description = "Number of lags in the VAR."),
+              P("bvar_lambda", "Prior shrinkage (lambda)", "numeric", 0.2, 0.01, 5, 0.05,
+                description = "Minnesota-prior tightness; smaller = more shrinkage toward random walk."),
+              P("bvar_draws", "Posterior draws", "integer", 1000, 100, 20000, 100,
+                description = "Total MCMC iterations."),
+              P("bvar_burn", "Burn-in draws", "integer", 500, 0, 10000, 100,
+                description = "Discarded warm-up iterations."))),
+  dfm = list(id = "dfm", label = "Dynamic Factor Model (DFM)", engine = "R",
+            task_types = c("time_series","regression"), fn = fit_dfm,
+            available = function() avail_pkg("dfms",
+              hint = "install.packages('dfms')"),
+            description = paste(
+              "Dynamic Factor Model: a small number of latent factors driving many indicators (Stock & Watson; Doz, Giannone & Reichlin).",
+              "Workhorse for nowcasting GDP."),
+            best_for = c("large panels of macro indicators",
+                         "nowcasting low-frequency aggregates"),
+            avoid_when = c("only a handful of variables (use VAR/BVAR)",
+                          "purely univariate series"),
+            reference_url = "https://CRAN.R-project.org/package=dfms",
+            dependencies = c("R: dfms"),
+            params = list(
+              P("dfm_r", "Number of factors r", "integer", 2, 1, 10, 1,
+                description = "Number of latent dynamic factors."),
+              P("dfm_p", "Factor VAR lags p", "integer", 1, 1, 6, 1,
+                description = "Lag order of the factor VAR."),
+              P("dfm_em_max_iter", "EM max iterations", "integer", 100, 10, 1000, 10,
+                description = "Maximum EM iterations for the DGR estimator."))),
+
+  # ---- Mixed-frequency / nowcasting ---------------------------------
+  midas = list(id = "midas", label = "MIDAS regression", engine = "R",
+            task_types = c("time_series","regression"), fn = fit_midas,
+            available = function() avail_pkg("midasr",
+              hint = "install.packages('midasr')"),
+            description = paste(
+              "Mixed-Data Sampling regression: a low-frequency target on lags of a high-frequency predictor",
+              "weighted by an Almon / Beta polynomial."),
+            best_for = c("forecasting GDP from monthly / weekly indicators",
+                         "nowcasting with hard-data releases"),
+            avoid_when = c("equal-frequency data (use VAR)",
+                          "very short low-frequency histories"),
+            reference_url = "https://CRAN.R-project.org/package=midasr",
+            dependencies = c("R: midasr"),
+            params = list(
+              P("midas_high_lags", "High-frequency lags per low-freq period", "integer", 4, 1, 24, 1,
+                description = "Number of high-frequency lags aggregated into each low-freq obs."),
+              P("midas_poly", "Polynomial weighting", "select", "almonp",
+                choices = c("almonp","nealmon"),
+                description = "Almon (almonp) or normalized exponential Almon (nealmon)."))),
+
   # ---- Deep Learning -------------------------------------------------
   lstm = list(id = "lstm", label = "LSTM (Long Short-Term Memory)", engine = "R",
             task_types = c("time_series","binary_classification","multiclass_classification"),
@@ -1731,7 +2270,11 @@ MODELS <- list(
             params = list(
               P("growth", "Growth", "select", "linear",
                 choices = c("linear", "logistic", "flat"),
-                description = "Trend type. 'logistic' requires a saturation cap (auto-set to 1.5 * max(y))."),
+                description = "Trend type. 'logistic' requires a saturation cap (auto-set to 1.5 * max(y) unless overridden)."),
+              P("prophet_cap", "Cap (logistic growth)", "text", "",
+                description = "Saturation ceiling. Numeric scalar (e.g. 1000) or column name. Required when growth='logistic'; leave blank for auto."),
+              P("prophet_floor", "Floor (logistic growth)", "text", "",
+                description = "Saturation floor. Numeric scalar or column name; defaults to 0 when growth='logistic'."),
               P("seasonality_mode", "Seasonality mode", "select", "additive",
                 choices = c("additive", "multiplicative"),
                 description = "Multiplicative when seasonality scales with the level of the series."),
@@ -1797,7 +2340,18 @@ model_install_command <- function(model_id) {
     catboost    = "install.packages('catboost', repos = 'https://catboost.ai/repo/r')",
     arima       = "install.packages('forecast')",
     ets         = "install.packages('forecast')",
-    tbats       = "install.packages('forecast')"
+    tbats       = "install.packages('forecast')",
+    naive       = "install.packages('forecast')",
+    snaive      = "install.packages('forecast')",
+    rwf_drift   = "install.packages('forecast')",
+    meanf       = "install.packages('forecast')",
+    theta       = "install.packages('forecast')",
+    stl_arima   = "install.packages('forecast')",
+    var         = "install.packages('vars')",
+    vecm        = "install.packages(c('urca','vars'))",
+    bvar        = "install.packages('BVAR')",
+    dfm         = "install.packages('dfms')",
+    midas       = "install.packages('midasr')"
   )
   cmd <- per_model[[model_id]]
   if (!is.null(cmd)) return(cmd)

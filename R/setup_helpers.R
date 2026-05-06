@@ -47,6 +47,10 @@ if (!exists("%||%", mode = "function"))
 .shinyml_optional <- c("prophet", "lightgbm", "catboost",
                        "keras3", "keras", "TSLSTMplus",
                        "themis", "future",
+                       # Bundesbank-style time-series additions
+                       "vars", "urca", "BVAR", "dfms", "midasr",
+                       # Predictor / causal analysis adapters
+                       "iml", "pdp", "sandwich", "lmtest", "AER",
                        # PDF report rendering (Chrome-print)
                        "pagedown",
                        # Markdown -> PDF fallback
