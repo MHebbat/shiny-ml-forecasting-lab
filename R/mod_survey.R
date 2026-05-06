@@ -444,6 +444,33 @@ survey_ui <- function(id) {
       uiOutput(ns("design_inputs")),
       uiOutput(ns("repweight_inputs")),
       uiOutput(ns("implicate_badge")),
+      tags$hr(class = "studio-rule"),
+      tags$div(class = "studio-kicker", "VARIANCE ESTIMATION"),
+      selectInput(ns("variance_method"), NULL,
+                   choices = c(
+                     "Taylor linearization (default)" = "taylor",
+                     "Bootstrap"                       = "bootstrap",
+                     "JK1 (jackknife)"                 = "JK1",
+                     "JKn (stratified jackknife)"      = "JKn",
+                     "BRR (balanced repeated rep)"     = "BRR",
+                     "Fay's BRR"                       = "Fay",
+                     "ACS-style replicate weights"     = "ACS"
+                   ),
+                   selected = "taylor", width = "100%"),
+      conditionalPanel(
+        condition = sprintf(
+          "['bootstrap','JK1','JKn','BRR','Fay'].indexOf(input['%s']) >= 0",
+          ns("variance_method")),
+        sliderInput(ns("var_replicates"), "Replicate count",
+                     min = 50, max = 2000, value = 200, step = 50)
+      ),
+      conditionalPanel(
+        condition = sprintf("input['%s'] == 'Fay'", ns("variance_method")),
+        sliderInput(ns("brr_rho"), "Fay rho", min = 0, max = 0.5,
+                     value = 0, step = 0.05)
+      ),
+      tags$small(class = "text-muted", style = "display:block;",
+        "Method governs every weighted descriptive, weighted xtab, and svyglm SE."),
       hr(),
       actionButton(ns("declare"), "Declare design",
                     class = "btn-primary w-100", icon = icon("check")),
@@ -462,9 +489,10 @@ survey_ui <- function(id) {
       hr(),
       navset_card_underline(
         title = "Survey workspace",
-        nav_panel("Codebook",     DT::DTOutput(ns("codebook"))),
+        nav_panel("Codebook",     codebook_ui(ns("cb"))),
         nav_panel("Descriptives", uiOutput(ns("descr_ui"))),
         nav_panel("Crosstab",     uiOutput(ns("xtab_ui"))),
+        nav_panel("MI Pooled",    uiOutput(ns("mi_ui"))),
         nav_panel("Likert grid",  uiOutput(ns("likert_ui"))),
         nav_panel("Panel report", verbatimTextOutput(ns("panel_out")))
       )
@@ -552,8 +580,9 @@ survey_server <- function(id, state, parent_session = NULL) {
                style = "padding:6px 10px; margin-top:8px;",
                icon("layer-group"), tags$b(" "), msg,
                tags$br(),
-               tags$small("Descriptives use the first implicate. ",
-                           "Pooling via Rubin's rules is staged for commit B."))
+               tags$small("Single-implicate descriptives appear on the Descriptives tab. ",
+                           "For pooled estimates with FMI / lambda, see the ",
+                           tags$b("MI Pooled"), " tab."))
     })
 
     # ---- Templates ------------------------------------------------
@@ -656,6 +685,29 @@ survey_server <- function(id, state, parent_session = NULL) {
                         use_mse = isTRUE(input$rep_mse %||% TRUE),
                         implicates = implicate_info())
       d$df <- state$raw_data
+
+      # Apply selectable variance method on top of the base design (when
+      # the user picked a non-Taylor method on a Standard design).
+      vmethod <- input$variance_method %||% "taylor"
+      reps    <- as.integer(input$var_replicates %||% 200L)
+      brr_rho <- as.numeric(input$brr_rho %||% 0)
+      if (!identical(vmethod, "taylor") && method == "standard" &&
+          !is.null(d$design) &&
+          requireNamespace("survey", quietly = TRUE)) {
+        new_des <- tryCatch({
+          args <- list(design = d$design, type = vmethod, replicates = reps)
+          if (vmethod == "Fay") args$fay.rho <- brr_rho
+          do.call(survey::as.svrepdesign, args)
+        }, error = function(e) NULL)
+        if (!is.null(new_des)) {
+          d$design <- new_des
+          d$kind <- "replicate"
+          d$message <- sprintf(
+            "%s · variance: %s (%d reps%s)", d$message, vmethod, reps,
+            if (vmethod == "Fay") sprintf(", rho=%.2f", brr_rho) else "")
+        }
+      }
+
       design_state(d)
       state$survey_design <- list(
         method = method,
@@ -666,7 +718,10 @@ survey_server <- function(id, state, parent_session = NULL) {
         repdesign_type = input$rep_type %||% NA_character_,
         combined_weights = isTRUE(input$rep_combined %||% TRUE),
         use_mse = isTRUE(input$rep_mse %||% TRUE),
-        implicates = d$implicates)
+        implicates = d$implicates,
+        variance = list(method = vmethod, replicates = reps,
+                         brr_rho = if (vmethod == "Fay") brr_rho else NA_real_)
+      )
       tryCatch(db_save_survey_design(state$dataset_id,
                                        state$survey_design),
                 error = function(e) NULL)
@@ -801,8 +856,11 @@ survey_server <- function(id, state, parent_session = NULL) {
                           error = function(e) {
                             flash(paste("Save failed:",
                                           conditionMessage(e)), "error"); NULL })
-      if (!is.null(bundle))
+      if (!is.null(bundle)) {
+        state$current_project   <- basename(bundle)
+        state$last_project_save <- bundle
         flash(sprintf("Project saved to %s", bundle), "message")
+      }
     })
     output$export_brief_html <- downloadHandler(
       filename = function()
@@ -818,14 +876,8 @@ survey_server <- function(id, state, parent_session = NULL) {
       }
     )
 
-    # ---- Codebook --------------------------------------------------
-    output$codebook <- DT::renderDT({
-      req(state$raw_data)
-      cb <- build_codebook(state$raw_data, state$labels %||% list())
-      DT::datatable(cb, filter = "top",
-        options = list(pageLength = 15, dom = "tip", scrollX = TRUE),
-        rownames = FALSE, class = "compact stripe")
-    })
+    # ---- Codebook (rich, searchable, label-aware) ------------------
+    codebook_server("cb", state)
 
     # ---- Descriptives ----------------------------------------------
     output$descr_ui <- renderUI({
@@ -914,6 +966,170 @@ survey_server <- function(id, state, parent_session = NULL) {
                         font = list(color = "#e8e6e0"),
                         yaxis = list(title = "Percent"),
                         xaxis = list(title = ""))
+    })
+
+    # ---- MI Pooled (Rubin's rules) --------------------------------
+    output$mi_ui <- renderUI({
+      req(state$raw_data)
+      info <- implicate_info()
+      if (is.null(info) || info$kind == "none" || info$n < 2) {
+        return(tags$div(class = "alert alert-secondary",
+          icon("circle-info"), tags$b(" "),
+          "No multi-implicate structure detected. ",
+          "Pooling via Rubin's rules requires >= 2 implicates."))
+      }
+      if (!requireNamespace("mitools", quietly = TRUE) ||
+          !requireNamespace("survey", quietly = TRUE)) {
+        return(tags$div(class = "alert alert-warning",
+          icon("triangle-exclamation"),
+          " Install 'mitools' and 'survey' for pooled estimation: ",
+          tags$code("install.packages(c('mitools','survey'))")))
+      }
+      cols <- names(state$raw_data)
+      tagList(
+        tags$div(class = "studio-kicker", "POOLED ESTIMATION"),
+        tags$small(class = "text-muted", style = "display:block;margin-bottom:8px;",
+          sprintf("MI detected: %d implicates (%s).", info$n, info$kind),
+          " Estimates are combined via mitools::MIcombine."),
+        radioButtons(ns("mi_estimator"), "Estimator", inline = TRUE,
+                      choices = c("Mean (svymean)" = "svymean",
+                                  "Quantile (svyquantile)" = "svyquantile",
+                                  "Ratio (svyratio)" = "svyratio",
+                                  "Linear regression (svyglm)" = "svyglm_lm",
+                                  "Logistic regression (svyglm)" = "svyglm_logit"),
+                      selected = "svymean"),
+        conditionalPanel(
+          condition = sprintf(
+            "input['%s'] == 'svymean' || input['%s'] == 'svyquantile'",
+            ns("mi_estimator"), ns("mi_estimator")),
+          selectInput(ns("mi_var"), "Variable", cols, selected = cols[1])
+        ),
+        conditionalPanel(
+          condition = sprintf("input['%s'] == 'svyratio'", ns("mi_estimator")),
+          selectInput(ns("mi_num"),  "Numerator",   cols, selected = cols[1]),
+          selectInput(ns("mi_den"),  "Denominator", cols,
+                       selected = utils::tail(cols, 1))
+        ),
+        conditionalPanel(
+          condition = sprintf(
+            "input['%s'] == 'svyglm_lm' || input['%s'] == 'svyglm_logit'",
+            ns("mi_estimator"), ns("mi_estimator")),
+          textInput(ns("mi_formula"), "Formula (R syntax)",
+                     value = "", placeholder = "y ~ x1 + x2"),
+          tags$small(class = "text-muted", style = "display:block;",
+            "Two-sided formula. Logistic expects a 0/1 outcome.")
+        ),
+        actionButton(ns("mi_run"), "Pool estimate",
+                      class = "btn-primary", icon = icon("layer-group")),
+        tags$hr(class = "studio-rule"),
+        tags$div(class = "studio-kicker", "POOLED RESULTS"),
+        DT::DTOutput(ns("mi_result")),
+        tags$hr(class = "studio-rule"),
+        tags$div(class = "studio-kicker", "DIAGNOSTICS (FMI / lambda)"),
+        verbatimTextOutput(ns("mi_diag"))
+      )
+    })
+
+    # Build implicate list using current detection + survey-design hint.
+    .build_implicates <- function() {
+      info <- implicate_info()
+      if (is.null(info) || info$kind == "none") return(list())
+      hint <- if (info$kind == "long")
+        list(kind = "long", column = info$column)
+      else if (info$kind == "wide")
+        list(kind = "wide", pattern = info$pattern)
+      else NULL
+      mi_detect(state$raw_data, hint = hint)
+    }
+
+    mi_combined <- reactiveVal(NULL)
+    observeEvent(input$mi_run, {
+      implicates <- tryCatch(.build_implicates(),
+                              error = function(e) list())
+      if (length(implicates) < 2) {
+        flash("Could not split data into >= 2 implicates.", "warning")
+        return()
+      }
+      sd <- state$survey_design %||% list()
+      sd$variance_method <- (sd$variance %||% list())$method
+      sd$replicates      <- (sd$variance %||% list())$replicates
+      sd$brr_rho         <- (sd$variance %||% list())$brr_rho
+
+      designs <- tryCatch(mi_designs(implicates, sd),
+                          error = function(e) {
+                            flash(paste("Design build failed:",
+                                          conditionMessage(e)), "error")
+                            NULL })
+      req(designs)
+
+      est <- input$mi_estimator
+      out <- tryCatch({
+        if (est == "svymean")
+          mi_estimate(designs, formula = stats::as.formula(
+            paste0("~", input$mi_var)), model = "svymean")
+        else if (est == "svyquantile")
+          mi_estimate(designs, formula = stats::as.formula(
+            paste0("~", input$mi_var)), model = "svyquantile",
+            quantile_probs = 0.5)
+        else if (est == "svyratio")
+          mi_estimate(designs,
+            numerator = stats::as.formula(paste0("~", input$mi_num)),
+            denominator = stats::as.formula(paste0("~", input$mi_den)),
+            model = "svyratio")
+        else if (est == "svyglm_lm")
+          mi_estimate(designs,
+            formula = stats::as.formula(input$mi_formula %||% ""),
+            family = stats::gaussian, model = "svyglm")
+        else if (est == "svyglm_logit")
+          mi_estimate(designs,
+            formula = stats::as.formula(input$mi_formula %||% ""),
+            family = stats::quasibinomial, model = "svyglm")
+      }, error = function(e) {
+        flash(paste("Pooling failed:", conditionMessage(e)), "error")
+        NULL
+      })
+      mi_combined(out)
+      if (!is.null(out))
+        flash(sprintf("Pooled %d implicates (%s).",
+                      attr(out, "n_implicates") %||% length(implicates),
+                      est), "message")
+    })
+
+    output$mi_result <- DT::renderDT({
+      r <- mi_combined()
+      if (is.null(r)) return(DT::datatable(
+        data.frame(message = "Pool an estimate to populate this panel.")))
+      view <- r
+      view$estimate  <- round(view$estimate,  6)
+      view$std.error <- round(view$std.error, 6)
+      view$statistic <- round(view$statistic, 4)
+      view$p.value   <- round(view$p.value,   6)
+      view$df        <- round(view$df, 2)
+      view$fmi       <- round(view$fmi, 4)
+      view$riv       <- round(view$riv, 4)
+      view$lambda    <- round(view$lambda, 4)
+      DT::datatable(view, options = list(dom = "tip", pageLength = 15,
+                                          scrollX = TRUE),
+                     rownames = FALSE, class = "compact stripe")
+    })
+
+    output$mi_diag <- renderText({
+      r <- mi_combined()
+      if (is.null(r)) return("Pool an estimate to populate diagnostics.")
+      d <- mi_diagnostics(r)
+      paste0(
+        sprintf("Implicates pooled: %s\n", d$n_implicates %||% "?"),
+        sprintf("Model: %s\n", d$model %||% "?"),
+        sprintf("Avg FMI: %s\n",
+                format(round(d$avg_fmi, 4), nsmall = 4)),
+        sprintf("Max FMI: %s\n",
+                format(round(d$max_fmi, 4), nsmall = 4)),
+        sprintf("Avg lambda: %s\n",
+                format(round(d$avg_lambda, 4), nsmall = 4)),
+        "\nFMI = fraction of missing information; ",
+        "lambda = (1+1/m)*B / T; ",
+        "high values indicate sensitivity to imputation choice."
+      )
     })
 
     # ---- Panel report ---------------------------------------------

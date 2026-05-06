@@ -964,6 +964,64 @@ modellab_server <- function(id, state) {
       req(out)
       out$model_id <- m$id
       out$train_config <- tcfg
+
+      # ---- MI pooling (Rubin's rules) -------------------------------
+      # When the dataset has multiple implicates AND the user picked a
+      # model that fits via svyglm (lm or logit), route the coefficient
+      # / SE estimates through mi_estimate so the published model
+      # diagnostics reflect proper Rubin pooling. Other models keep
+      # their first-implicate fit and surface a notice in the log.
+      out$mi_pooled <- NULL
+      if (is_mi_design(state)) {
+        if (input$model_id %in% c("lm", "logit") &&
+            requireNamespace("mitools", quietly = TRUE) &&
+            requireNamespace("survey", quietly = TRUE)) {
+          info <- state$survey_design$implicates
+          hint <- if (identical(info$kind, "long"))
+                    list(kind = "long", column = info$column)
+                  else if (identical(info$kind, "wide"))
+                    list(kind = "wide", pattern = info$pattern)
+                  else NULL
+          implicates <- tryCatch(mi_detect(state$raw_data, hint = hint),
+                                  error = function(e) list())
+          if (length(implicates) >= 2) {
+            sd <- state$survey_design
+            sd$variance_method <- (sd$variance %||% list())$method
+            sd$replicates      <- (sd$variance %||% list())$replicates
+            sd$brr_rho         <- (sd$variance %||% list())$brr_rho
+            preds_in_train <- intersect(names(train_df), names(implicates[[1]]))
+            preds <- setdiff(preds_in_train, c(target, sw_col, rep_w))
+            if (length(preds) >= 1L) {
+              fmla <- stats::as.formula(
+                paste(target, "~", paste(preds, collapse = " + ")))
+              fam  <- if (input$model_id == "logit") stats::quasibinomial
+                                                     else stats::gaussian
+              designs <- tryCatch(mi_designs(implicates, sd),
+                                  error = function(e) NULL)
+              if (!is.null(designs)) {
+                pooled <- tryCatch(
+                  mi_estimate(designs, formula = fmla, family = fam,
+                               model = "svyglm"),
+                  error = function(e) {
+                    add_log("MI pooling failed: ", conditionMessage(e))
+                    NULL
+                  })
+                if (!is.null(pooled)) {
+                  out$mi_pooled <- pooled
+                  add_log(sprintf(
+                    "MI pooling: %d implicates pooled via svyglm.",
+                    attr(pooled, "n_implicates") %||% length(implicates)))
+                }
+              }
+            }
+          }
+        } else if (!input$model_id %in% c("lm", "logit")) {
+          add_log(sprintf(
+            "Note: '%s' is not a svyglm-poolable model — using first-implicate fit only.",
+            input$model_id))
+        }
+      }
+
       state$last_model <- out
       state$last_params <- params
       state$n_train <- nrow(train_df)
@@ -1061,10 +1119,44 @@ modellab_server <- function(id, state) {
     output$diagnostics_card <- renderUI({
       req(state$last_model)
       diag <- state$last_model$fit$diagnostics
-      if (is.null(diag) || length(diag) == 0)
-        return(tags$div(class = "alert alert-secondary",
-                        "No model-fit diagnostics published by this model."))
+      mi   <- state$last_model$mi_pooled
+
+      mi_section <- if (is.null(mi)) NULL else {
+        d <- mi_diagnostics(mi)
+        view <- mi
+        view$estimate  <- round(view$estimate,  6)
+        view$std.error <- round(view$std.error, 6)
+        view$fmi       <- round(view$fmi,       4)
+        view$lambda    <- round(view$lambda,    4)
+        view$df        <- round(view$df,        2)
+        tags$div(class = "studio-intro",
+          tags$div(class = "studio-page",
+            tags$div(class = "studio-kicker", "MI POOLING"),
+            tags$ul(style = "margin-top:8px;",
+              tags$li(tags$b("Implicates pooled: "), d$n_implicates %||% "?"),
+              tags$li(tags$b("Avg FMI: "),
+                      format(round(d$avg_fmi, 4), nsmall = 4)),
+              tags$li(tags$b("Max FMI: "),
+                      format(round(d$max_fmi, 4), nsmall = 4)),
+              tags$li(tags$b("Avg lambda: "),
+                      format(round(d$avg_lambda, 4), nsmall = 4))
+            ),
+            tags$div(class = "studio-kicker",
+                      style = "margin-top:8px;", "POOLED COEFFICIENTS"),
+            DT::renderDT(DT::datatable(view,
+              options = list(dom = "tip", pageLength = 12, scrollX = TRUE),
+              rownames = FALSE, class = "compact stripe"))()
+          ))
+      }
+
+      if (is.null(diag) || length(diag) == 0) {
+        if (is.null(mi_section))
+          return(tags$div(class = "alert alert-secondary",
+                          "No model-fit diagnostics published by this model."))
+        return(mi_section)
+      }
       best_iter <- state$last_model$fit$model$best_iteration %||% NULL
+      tagList(
       tags$div(class = "studio-intro",
         tags$div(class = "studio-page",
           tags$div(class = "studio-kicker", "DIAGNOSTICS"),
@@ -1105,6 +1197,8 @@ modellab_server <- function(id, state) {
             )
           }
         )
+      ),
+      mi_section
       )
     })
 
@@ -1118,8 +1212,11 @@ modellab_server <- function(id, state) {
                           error = function(e) {
                             flash(paste("Save failed:",
                                           conditionMessage(e)), "error"); NULL })
-      if (!is.null(bundle))
+      if (!is.null(bundle)) {
+        state$current_project   <- basename(bundle)
+        state$last_project_save <- bundle
         flash(sprintf("Project saved to %s", bundle), "message")
+      }
     })
 
     # ---- Brief report ---------------------------------------------

@@ -257,6 +257,22 @@ flash <- function(msg, type = "default") {
   showNotification(msg, type = type, duration = 4)
 }
 
+# ---- Multiple-imputation gate ---------------------------------------
+# Returns TRUE iff state has a survey design with >=2 implicates and
+# the survey package is loadable. Used by the Survey panel and Model
+# Lab to decide whether to route through the MI pooling pipeline.
+is_mi_design <- function(state) {
+  sd <- if (is.null(state)) NULL else
+        tryCatch(state$survey_design, error = function(e) NULL)
+  if (is.null(sd)) return(FALSE)
+  imp <- sd$implicates
+  if (is.null(imp)) return(FALSE)
+  n <- imp$n %||% 0L
+  if (!is.finite(as.numeric(n)) || as.integer(n) < 2L) return(FALSE)
+  if (!requireNamespace("survey", quietly = TRUE)) return(FALSE)
+  TRUE
+}
+
 # ---- Bootstrap helpers -----------------------------------------------
 # Pure-R bootstrap of a scalar metric. Returns the point estimate, SE, and
 # percentile-method 95% confidence interval. Used by the Diagnostics card

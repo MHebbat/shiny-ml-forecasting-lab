@@ -178,6 +178,8 @@ explore_ui <- function(id) {
             tags$h6("Top correlated pairs", style = "margin-top:12px;"),
             DT::DTOutput(ns("cor_pairs"))
           )),
+        nav_panel("Codebook",
+          codebook_ui(ns("cb"))),
         nav_panel("Prepped data", withSpinner(DT::DTOutput(ns("prepped"))))
       )
     )
@@ -190,6 +192,9 @@ explore_server <- function(id, state, parent_session = NULL) {
 
     output$has_data <- reactive({ !is.null(state$raw_data) })
     outputOptions(output, "has_data", suspendWhenHidden = FALSE)
+
+    # Wire the rich codebook viewer into the Explore tab.
+    codebook_server("cb", state)
 
     # Cross-links to other top-level tabs
     observeEvent(input$goto_dataprep, {

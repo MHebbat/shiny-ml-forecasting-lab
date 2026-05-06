@@ -53,8 +53,10 @@ source("R/ai_analysis.R", local = TRUE)
 source("R/manifest.R", local = TRUE)
 source("R/io_project.R", local = TRUE)
 source("R/report_render.R", local = TRUE)
+source("R/mi_pipeline.R", local = TRUE)
 source("R/docs_content.R", local = TRUE)
 source("R/mod_docs.R", local = TRUE)
+source("R/mod_codebook.R", local = TRUE)
 source("R/mod_ingest.R", local = TRUE)
 source("R/mod_explore.R", local = TRUE)
 source("R/mod_dataprep.R", local = TRUE)
@@ -101,6 +103,17 @@ if (window.Shiny) {
     var b = document.body;
     b.classList.remove('chrome-bundesbank','chrome-dark','chrome-light');
     if (m && m.cls) b.classList.add(m.cls);
+  });
+  Shiny.addCustomMessageHandler('shinyml_copy_clipboard', function(m){
+    if (!m || typeof m.text !== 'string') return;
+    if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(m.text).catch(function(){});
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = m.text; document.body.appendChild(ta);
+      ta.select(); try { document.execCommand('copy'); } catch(e) {}
+      document.body.removeChild(ta);
+    }
   });
 }"
     )),
@@ -163,7 +176,7 @@ if (window.Shiny) {
     studio_ui("studio")
   ),
   nav_panel(
-    "10 · Runs & Compare",
+    "10 · Runs & Projects",
     icon = icon("trophy"),
     runs_ui("runs")
   ),
@@ -200,6 +213,7 @@ if (window.Shiny) {
     tags$div(style = "display:flex; align-items:center; gap:6px; margin-right:8px;",
       tags$span(class = "studio-kicker",
                 style = "font-size:0.7em;", "PROJECT"),
+      uiOutput("project_badge_ui", inline = TRUE),
       uiOutput("project_picker_ui", inline = TRUE),
       actionButton("project_load_btn", "Load",
                     class = "btn-outline-primary btn-sm")
@@ -246,7 +260,9 @@ server <- function(input, output, session) {
     prep_log        = list(),  # applied prep steps
     survey_design   = NULL,    # declared survey design
     plot_theme      = "bundesbank", # active plot theme: bundesbank | studio | light
-    chrome_theme    = "bundesbank"  # active chrome: bundesbank | dark | light
+    chrome_theme    = "bundesbank", # active chrome: bundesbank | dark | light
+    current_project = NULL,         # name of currently loaded project bundle
+    last_project_save = NULL        # path to last saved project (refresh hook)
   )
 
   # Show python availability status in navbar
@@ -268,6 +284,19 @@ server <- function(input, output, session) {
     state$chrome_theme <- th
     session$sendCustomMessage("shinyml_set_chrome",
       list(cls = paste0("chrome-", th)))
+  })
+
+  # ---- Project badge -------------------------------------------------
+  output$project_badge_ui <- renderUI({
+    nm <- state$current_project
+    if (is.null(nm) || !nzchar(nm))
+      tags$span(class = "badge bg-secondary",
+                style = "font-size:0.78em;", "(unsaved)")
+    else
+      tags$span(class = "badge bg-primary",
+                style = "font-size:0.78em;",
+                title = sprintf("Loaded project: %s", nm),
+                substr(nm, 1, 28))
   })
 
   # ---- Project picker UI ---------------------------------------------
@@ -295,7 +324,8 @@ server <- function(input, output, session) {
                       flash(paste("Load failed:",
                                     conditionMessage(e)), "error"); NULL })
     req(res)
-    flash(sprintf("Loaded project '%s'.", res$name %||% basename(p)),
+    state$current_project <- res$name %||% basename(p)
+    flash(sprintf("Loaded project '%s'.", state$current_project),
           "message")
   })
 

@@ -161,6 +161,48 @@
     htmltools::htmlEscape(sw$R %||% R.version.string),
     htmltools::htmlEscape(sw$os %||% "—"))
 
+  # ---- Codebook appendix (only for labelled / haven imports) -------
+  cb_html <- ""
+  fmt <- {
+    aid <- state$active_id
+    if (!is.null(aid) && !is.null(state$datasets[[aid]]))
+      state$datasets[[aid]]$format
+    else NULL
+  }
+  is_haven_src <- !is.null(fmt) &&
+    grepl("^(dta|sav|sas7bdat|labelled)$", as.character(fmt),
+          ignore.case = TRUE)
+  if (is_haven_src && !is.null(state$raw_data) &&
+      exists("build_codebook_rich", mode = "function")) {
+    cb_rows <- tryCatch(
+      build_codebook_rich(state$raw_data, state$labels %||% list()),
+      error = function(e) NULL)
+    if (!is.null(cb_rows) && nrow(cb_rows) > 0) {
+      header_cols <- c("name","type","label","pct_missing","n_unique",
+                        "n_value_labels","summary")
+      header_cols <- intersect(header_cols, names(cb_rows))
+      hdr <- paste(sprintf("<th>%s</th>",
+                            htmltools::htmlEscape(header_cols)),
+                    collapse = "")
+      body <- paste(vapply(seq_len(nrow(cb_rows)), function(i) {
+        cells <- vapply(header_cols, function(cn) {
+          v <- cb_rows[[cn]][i]
+          if (is.list(v)) v <- paste(unlist(v), collapse = ", ")
+          v <- as.character(v)
+          if (is.na(v) || !nzchar(v)) "—" else htmltools::htmlEscape(v)
+        }, character(1))
+        sprintf("<tr>%s</tr>",
+                paste(sprintf("<td>%s</td>", cells), collapse = ""))
+      }, character(1)), collapse = "")
+      cb_html <- sprintf(
+        "<h2>12. Codebook (appendix)</h2>
+         <p class='muted'>Active dataset is in a labelled format (%s) — the codebook is included as a reproducibility aid.</p>
+         <table class='kv'><thead><tr>%s</tr></thead><tbody>%s</tbody></table>",
+        htmltools::htmlEscape(as.character(fmt)),
+        hdr, body)
+    }
+  }
+
   manifest_hash <- if (!is.null(ds$sha256) && nzchar(ds$sha256))
     substr(ds$sha256, 1, 12) else "n/a"
   foot_html <- sprintf(
@@ -169,7 +211,7 @@
 
   paste(hdr, ds_html, rec_html, sd_html, mod_html, val_html,
          met_html, diag_html, meth_html, lim_html, ref_html, sw_html,
-         foot_html, sep = "\n")
+         cb_html, foot_html, sep = "\n")
 }
 
 # Theme-aware skeleton CSS.

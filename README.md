@@ -42,6 +42,69 @@ SHINYML_MAX_UPLOAD_GB=20 ./run.sh
 
 This is set via `options(shiny.maxRequestSize = ...)` in `app.R`.
 
+## Survey inference
+
+The **Survey & Panel** tab declares a complex-sample design and then
+gives you label-aware descriptives, weighted crosstabs, an MI-aware
+**Pooled** estimator, and a rich **Codebook** view.
+
+### Design declaration
+
+Two design methods are supported:
+
+- **Standard (Taylor linearisation)** — `survey::svydesign` with
+  optional weights, strata, and PSU/cluster.
+- **Replicate weights** — `survey::svrepdesign` with a regex matching
+  replicate-weight columns and one of `BRR`, `Fay`, `JK1`, `JK2`,
+  `JKn`, `bootstrap`, `ACS`.
+
+A separate **Variance estimation** control selects how SEs are computed
+*independently* of the base method. When the base is Standard, picking
+any non-Taylor variance method (`bootstrap`, `JK1`, `JKn`, `BRR`, `Fay`)
+converts the design via `survey::as.svrepdesign(type=…, replicates=…)`.
+A replicate-count slider (50–2000, default 200) and a Fay `rho` slider
+(0–0.5, default 0) appear when applicable. The chosen method is recorded
+on `state$survey_design$variance$method` and on the manifest.
+
+### Multiple Imputation (Rubin's rules)
+
+When the dataset has `>= 2` implicates (long format with an `implicate`
+column, wide-suffix `*_imp1..N` / `*_i1..N`, or an explicit list passed
+in `state$survey_design$implicate_list`), the Survey tab exposes a
+**MI Pooled** panel powered by `mitools` + `survey`:
+
+- Estimators: weighted mean (`svymean`), quantile (`svyquantile`),
+  ratio (`svyratio`), linear regression (`svyglm` / Gaussian), logistic
+  regression (`svyglm` / quasibinomial).
+- Each estimate is fit on every implicate, then pooled via
+  `mitools::MIcombine`.
+- The result table reports `term`, `estimate`, `std.error`,
+  `statistic`, `p.value`, `df`, and Rubin's diagnostics: **fmi**
+  (fraction of missing information), **riv**, **lambda**.
+- A diagnostics block summarises the average / max FMI and lambda
+  across pooled terms.
+
+In **Model Lab**, when MI is detected and the user picks `lm` or
+`logit`, the run is *additionally* routed through `mi_estimate` so the
+Diagnostics tab shows a full pooled coefficient table with FMI and
+pooled CIs. Other models still fit (using the first implicate) and the
+console log explains the limitation. See
+[`docs/survey_designs.md`](docs/survey_designs.md) for the worked PHF
+and HFCN examples.
+
+## Codebook viewer
+
+A new label-aware **Codebook** module (`R/mod_codebook.R`) is wired
+into both the **Explore** tab and the **Survey** tab. For every variable
+it shows: name, type bucket (numeric / labelled / factor / character /
+logical / date / datetime), variable label, value-label count, missing
+%, n unique, example values, and a numeric range / top-categories
+summary. The panel supports search, type filtering, single-row
+selection (which expands the value-label dictionary), **Copy as
+markdown**, and **Download .md**. When the active dataset is `.dta` /
+`.sav` / `.sas7bdat`, the **Brief Report** appendix embeds the codebook
+verbatim.
+
 ## Survey templates (PHF & HFCN)
 
 The Survey & Panel tab ships with one-click templates for two euro-area
@@ -64,6 +127,29 @@ and the navbar switches to Model Lab. Models that support `weights`
 (`lm`, `glm`, `glmnet`, `ranger`, `xgboost`, `gam`) automatically use
 the survey weights; the run log states explicitly when a model ignores
 them.
+
+## Project workspace
+
+Tab **10 · Runs & Projects** now hosts two sub-tabs:
+
+- **Projects** — every saved bundle (`~/.shinyml/projects/`) listed
+  with name, saved-at, dataset name + sha256 short, model id, primary
+  metric, and manifest hash. Per-row buttons:
+  - **Open** — `project_load()` and switches to Model Lab.
+  - **Reproduce** — replays the recipe in a fresh state, recomputes
+    the dataset SHA, and reports whether the saved metric reproduces
+    within a configurable tolerance epsilon.
+  - **Diff** — pick exactly two rows and click *Diff selected pair* for
+    a side-by-side recipe + survey-design + metric comparison.
+  - **Delete** — confirm modal first.
+- **Runs** — the existing leaderboard / stats explorer.
+
+The navbar carries a **Project** badge that shows the loaded project
+name (or `(unsaved)`); save actions in Survey or Model Lab update it
+live.
+
+See [`docs/reproducibility.md`](docs/reproducibility.md) for the full
+pipeline (manifest + project bundle + Reproduce flow).
 
 ## Project save / load + brief reports
 
