@@ -337,22 +337,71 @@ modellab_server <- function(id, state) {
     })
 
     # ---- Availability badge / warning -----------------------------------
+    # Soft inline variant. The prominent variant (modal with copy-to-
+    # clipboard install command) only appears when the user clicks Train.
     output$availability_card <- renderUI({
       req(input$model_id)
       av <- model_availability(input$model_id)
       if (isTRUE(av$ok) && is.null(av$msg)) {
-        return(tags$div(style = "margin-top:6px;",
-          tags$span(class = "badge", style = "background:#3fb950;",
-                    icon("check"), " Available")))
+        return(tags$div(class = "dep-notice dep-ready",
+          tags$span(class = "dep-dot"),
+          tags$span(class = "dep-text", "Runtime available.")))
       }
-      tags$div(
-        class = if (isTRUE(av$ok)) "alert alert-info" else "alert alert-warning",
-        style = "font-size:0.85em; padding:8px 10px; margin-top:6px; line-height:1.45;",
-        icon(if (isTRUE(av$ok)) "circle-info" else "triangle-exclamation"),
-        tags$b(if (isTRUE(av$ok)) " Note" else " Optional dependency missing"),
-        br(),
-        av$msg %||% "This model's runtime is not available."
+      msg <- av$msg %||% "This model's runtime is not available."
+      tagList(
+        tags$div(class = "dep-notice",
+          tags$span(class = "dep-dot"),
+          tags$span(class = "dep-text",
+            if (isTRUE(av$ok)) tagList(tags$b("Note: "), msg)
+            else tagList(tags$b("Optional dependency: "), msg)),
+          if (!isTRUE(av$ok))
+            actionButton(ns("show_install_modal"),
+                          tagList(icon("download"), " Install now"),
+                          class = "btn-outline-warning btn-sm dep-action")
+        )
       )
+    })
+
+    # Modal: shows the install command + a copy button. We never
+    # auto-execute installs from inside the running Shiny session.
+    show_install_modal <- function(model_id, av) {
+      m <- MODELS[[model_id]]
+      label <- m$label %||% model_id
+      cmd <- model_install_command(model_id) %||%
+        paste(m$dependencies %||% character(0), collapse = "; ")
+      copy_id <- ns("copy_install_cmd")
+      js <- sprintf(
+        "navigator.clipboard.writeText(%s).then(function(){",
+        jsonlite::toJSON(cmd, auto_unbox = TRUE))
+      js <- paste0(js,
+        "  Shiny.setInputValue('", copy_id, "', Date.now(),",
+        "    {priority:'event'});",
+        "  var b=document.getElementById('", copy_id, "_btn');",
+        "  if(b){b.innerText='Copied';setTimeout(function(){",
+        "    b.innerText='Copy command';},1500);}",
+        "});")
+      showModal(modalDialog(
+        title = sprintf("Install %s dependencies", label),
+        size = "m", easyClose = TRUE,
+        tags$p(av$msg %||% "This model's runtime is not available."),
+        tags$p("Run the command below in your R console (not from inside ",
+               "this app), then restart the app."),
+        tags$code(class = "dep-modal-cmd", cmd),
+        tags$div(style = "display:flex; gap:8px;",
+          tags$button(id = paste0(copy_id, "_btn"),
+                       class = "btn btn-outline-warning btn-sm",
+                       onclick = js, "Copy command")),
+        footer = tagList(modalButton("Close"))
+      ))
+    }
+    observeEvent(input$show_install_modal, {
+      req(input$model_id)
+      av <- model_availability(input$model_id)
+      if (isTRUE(av$ok)) {
+        flash("This model's runtime is already available.", "message")
+        return()
+      }
+      show_install_modal(input$model_id, av)
     })
 
     # ---- Documentation drawer -------------------------------------------
@@ -745,7 +794,9 @@ modellab_server <- function(id, state) {
 
       av <- model_availability(input$model_id)
       if (!isTRUE(av$ok)) {
-        flash(av$msg %||% "Selected model is not available.", "warning")
+        # Surface the prominent install-instructions modal so the user
+        # has the exact command at hand. Skip training.
+        show_install_modal(input$model_id, av)
         add_log("SKIP: ", av$msg %||% "model not available")
         return()
       }

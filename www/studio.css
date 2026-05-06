@@ -209,3 +209,33 @@
 @media (max-width: 900px) {
   .studio-intro .studio-headline { font-size: 28px; }
 }
+
+/* ---- Dependency notice (soft inline variant of the old yellow alert) ----
+   Used by Model Lab's availability badge so an optional missing package
+   doesn't read as a hard blocker. The prominent variant only surfaces on
+   the modal that opens when the user actually clicks Train. */
+.dep-notice {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; line-height: 1.45;
+  color: var(--muted, #98a1ac);
+  background: transparent;
+  border: none;
+  padding: 6px 0 0;
+  margin: 6px 0 0;
+}
+.dep-notice .dep-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #d4af37; flex: 0 0 6px;
+}
+.dep-notice.dep-ready .dep-dot { background: #3fb950; }
+.dep-notice .dep-text { flex: 1; }
+.dep-notice .dep-action {
+  font-size: 12px; padding: 2px 8px; line-height: 1.2;
+}
+.dep-modal-cmd {
+  display: block; padding: 10px 12px; margin: 8px 0;
+  background: var(--paper, #1a1f25); color: var(--ink, #e6edf3);
+  border: 1px solid var(--rule, #30363d); border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12.5px; white-space: pre-wrap; word-break: break-all;
+}

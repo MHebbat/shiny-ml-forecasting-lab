@@ -185,8 +185,11 @@ RECIPE_STEP_VOCAB <- list(
 # transforms (date_features, parse_datetime) keep the time column.
 .recipe_resolve_targets <- function(step, df, target = NULL, time_col = NULL) {
   tgt <- step$targets
-  if (is.null(tgt) || (is.character(tgt) && length(tgt) == 0))
-    tgt <- "all_predictors"
+  # NULL targets => default to all predictors (used by manual UI when no
+  # scope is set). An EXPLICIT empty character vector means "no columns";
+  # do NOT fall back to all_predictors — that would let drop_* steps wipe
+  # the entire predictor matrix.
+  if (is.null(tgt)) tgt <- "all_predictors"
   if (length(tgt) == 1 && is.character(tgt) && tgt %in%
       c("all", "all_numeric", "all_categorical", "all_predictors")) {
     cols <- switch(tgt,
@@ -197,6 +200,8 @@ RECIPE_STEP_VOCAB <- list(
       "all_predictors"  = setdiff(names(df), target %||% character(0)),
       "all"             = names(df))
     resolved <- cols
+  } else if (is.character(tgt) && length(tgt) == 0) {
+    resolved <- character(0)
   } else {
     resolved <- intersect(as.character(tgt), names(df))
   }

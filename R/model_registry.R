@@ -163,25 +163,48 @@ lstm_make_supervised <- function(y, timesteps, target_col = NULL) {
 # We prefer keras3 (current CRAN package) and fall back to legacy keras.
 # Both must additionally have a working TensorFlow Python backend.
 .resolve_keras_backend <- function() {
-  has_tf <- function() {
+  # Three-state predicate:
+  #   1) keras3 R package not installed (and legacy keras absent too) → install
+  #   2) keras3 R package installed BUT a Python TF runtime is not configured
+  #      → user must run keras3::install_keras() once
+  #   3) ready (R package + Python TF reachable)
+  has_tf_via_reticulate <- function() {
     if (!requireNamespace("reticulate", quietly = TRUE)) return(FALSE)
     tryCatch(reticulate::py_module_available("tensorflow"),
              error = function(e) FALSE)
   }
+  is_keras3_runtime_ready <- function() {
+    # Prefer the package's own predicate when it exists; fall back to a
+    # reticulate probe so we still work on older keras3 builds.
+    via_pkg <- tryCatch(
+      isTRUE(asNamespace("keras3")$is_keras_available()),
+      error = function(e) NA)
+    if (isTRUE(via_pkg)) return(TRUE)
+    if (isFALSE(via_pkg)) return(FALSE)
+    has_tf_via_reticulate()
+  }
   if (.has("keras3")) {
-    if (!has_tf()) return(list(ok = FALSE, backend = "keras3", ns = NULL,
-      reason = "R package `keras3` is installed but TensorFlow is not configured. Run keras3::install_keras() once and restart."))
-    return(list(ok = TRUE, backend = "keras3",
+    if (!is_keras3_runtime_ready()) return(list(ok = FALSE, backend = "keras3",
+      ns = NULL, state = "installed_no_tf",
+      reason = paste0("`keras3` R package is installed but a Python ",
+        "TensorFlow runtime is not configured. ",
+        "Run `keras3::install_keras()` once to set it up, then restart.")))
+    return(list(ok = TRUE, backend = "keras3", state = "ready",
                 ns = asNamespace("keras3"), reason = NULL))
   }
   if (.has("keras")) {
-    if (!has_tf()) return(list(ok = FALSE, backend = "keras", ns = NULL,
-      reason = "R package `keras` is installed but TensorFlow is not configured. Run keras::install_keras() once and restart."))
-    return(list(ok = TRUE, backend = "keras",
+    if (!has_tf_via_reticulate()) return(list(ok = FALSE, backend = "keras",
+      ns = NULL, state = "installed_no_tf",
+      reason = paste0("`keras` R package is installed but a Python ",
+        "TensorFlow runtime is not configured. ",
+        "Run `keras::install_keras()` once to set it up, then restart.")))
+    return(list(ok = TRUE, backend = "keras", state = "ready",
                 ns = asNamespace("keras"), reason = NULL))
   }
-  list(ok = FALSE, backend = NA, ns = NULL,
-       reason = "Neither `keras3` (preferred) nor `keras` is installed. Install one with `install.packages('keras3'); keras3::install_keras()` and restart.")
+  list(ok = FALSE, backend = NA, ns = NULL, state = "not_installed",
+       reason = paste0("Neither `keras3` (preferred) nor `keras` is ",
+         "installed. Run `install.packages('keras3'); ",
+         "keras3::install_keras()` and restart."))
 }
 
 # ---- Model implementations -------------------------------------------
@@ -1676,6 +1699,45 @@ model_availability <- function(model_id) {
   if (is.null(m$available)) return(avail_ok())
   tryCatch(m$available(),
            error = function(e) list(ok = FALSE, msg = conditionMessage(e)))
+}
+
+# Canonical install command for a model. Used by the dependency modal in
+# Model Lab to show a one-liner the user can copy. We never auto-execute
+# installs from inside the running Shiny session.
+model_install_command <- function(model_id) {
+  per_model <- list(
+    lstm        = "install.packages('keras3'); keras3::install_keras()",
+    kan         = "install.packages('torch'); torch::install_torch()",
+    prophet     = "install.packages('prophet')",
+    glmnet_reg  = "install.packages('glmnet')",
+    glmnet_clf  = "install.packages('glmnet')",
+    gam         = "install.packages('mgcv')",
+    ranger_reg  = "install.packages('ranger')",
+    ranger_clf  = "install.packages('ranger')",
+    xgb_reg     = "install.packages('xgboost')",
+    xgb_clf     = "install.packages('xgboost')",
+    lightgbm    = "install.packages('lightgbm')",
+    catboost    = "install.packages('catboost', repos = 'https://catboost.ai/repo/r')",
+    arima       = "install.packages('forecast')",
+    ets         = "install.packages('forecast')",
+    tbats       = "install.packages('forecast')"
+  )
+  cmd <- per_model[[model_id]]
+  if (!is.null(cmd)) return(cmd)
+  m <- MODELS[[model_id]]
+  if (is.null(m)) return(NULL)
+  deps <- m$dependencies %||% character(0)
+  r_deps <- gsub("^R:\\s*", "", grep("^R:", deps, value = TRUE))
+  if (length(r_deps) > 0) {
+    pkg <- sub("\\s.*$", "", r_deps[1])
+    return(sprintf("install.packages('%s')", pkg))
+  }
+  py_deps <- gsub("^Python:\\s*", "", grep("^Python:", deps, value = TRUE))
+  if (length(py_deps) > 0) {
+    mod <- sub("\\s.*$", "", py_deps[1])
+    return(sprintf("reticulate::py_install('%s')", mod))
+  }
+  NULL
 }
 
 # ---- Editorial metadata for existing models -------------------------------
