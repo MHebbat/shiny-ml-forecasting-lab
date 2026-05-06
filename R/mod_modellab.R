@@ -25,14 +25,14 @@ modellab_ui <- function(id) {
             tags$span(class = "studio-kicker", "TRAINING STUDIO")
           ),
           tags$h1(class = "studio-headline",
-                  "Pick a model. Train it deliberately."),
+                  "Model Estimation."),
           tags$p(class = "studio-deck",
-            "Every model in the registry comes with a plain-English description, ",
-            "a ", tags$b("best-for"), " / ", tags$b("avoid-when"),
-            " card, and a documentation drawer. ",
-            "Hyperparameters are grouped by purpose. Validation, resampling, ",
-            "class weighting, early stopping, parallelism and a compute-time cap ",
-            "are first-class controls — every input you set is consumed by the fit."
+            "Specification, hyperparameter configuration, validation strategy, ",
+            "and reproducibility controls for every model in the registry. ",
+            "Every model carries a methodological description, a ",
+            tags$b("best-for"), " / ", tags$b("avoid-when"),
+            " card, and a deep-dive documentation drawer. Hyperparameters ",
+            "are grouped by role; the resolved JSON is shown before training."
           ),
           tags$div(class = "studio-rule")
         )

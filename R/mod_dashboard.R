@@ -30,6 +30,7 @@ dashboard_ui <- function(id) {
         # Residuals
         nav_panel("Residual Diagnostics",
           icon = icon("wave-square"),
+          uiOutput(ns("methodology_card")),
           layout_columns(col_widths = c(6, 6),
             withSpinner(plotlyOutput(ns("resid_fitted"), height = "320px")),
             withSpinner(plotlyOutput(ns("resid_hist"),   height = "320px"))),
@@ -155,84 +156,125 @@ dashboard_server <- function(id, state) {
     # ---- Plots -------------------------------------------------------
     output$fit_plot <- renderPlotly({
       d <- .pred_df()
+      pal <- plot_theme_palette(state, "qualitative", 3)
       p <- plot_ly(d, x = ~idx) |>
         add_lines(y = ~actual,    name = "Actual",
-                  line = list(color = "#c9d1d9")) |>
+                  line = list(color = pal[3])) |>
         add_lines(y = ~predicted, name = "Predicted",
-                  line = list(color = "#3fb950"))
-      if (!all(is.na(d$lower)))
+                  line = list(color = pal[1]))
+      if (!all(is.na(d$lower))) {
+        rgb <- grDevices::col2rgb(pal[1])
         p <- add_ribbons(p, ymin = ~lower, ymax = ~upper, name = "PI",
-                         fillcolor = "rgba(63,185,80,0.2)",
+                         fillcolor = sprintf("rgba(%d,%d,%d,0.2)",
+                            rgb[1, 1], rgb[2, 1], rgb[3, 1]),
                          line = list(color = "transparent"))
-      p |> layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                  font = list(color = "#c9d1d9"),
-                  xaxis = list(title = "Index"),
-                  yaxis = list(title = state$meta$target %||% "y"))
+      }
+      plotly_apply_theme(p, state,
+        extra = list(xaxis = list(title = "Index"),
+                      yaxis = list(title = state$meta$target %||% "y")))
+    })
+
+    # ---- Methodology summary card (residual diagnostics) -----------
+    output$methodology_card <- renderUI({
+      req(state$last_model, state$meta)
+      a <- as.numeric(state$last_model$actual)
+      p <- as.numeric(state$last_model$predicted)
+      ok <- complete.cases(a, p)
+      a <- a[ok]; p <- p[ok]
+      n <- length(a)
+      task <- state$meta$task_type
+      is_class <- task %in% c("binary_classification","multiclass_classification")
+      bs <- tryCatch(bootstrap_metric(a, p,
+        metric_fn = if (is_class) function(x, y) mean(x == y, na.rm = TRUE)
+                                  else function(x, y) sqrt(mean((x - y)^2)),
+        R = 200L), error = function(e) NULL)
+      ci_text <- if (!is.null(bs) && is.finite(bs$lo))
+        sprintf("[%.4f, %.4f] (95%% percentile bootstrap, R=%d)",
+                bs$lo, bs$hi, bs$R) else "—"
+      bias <- mean(a - p, na.rm = TRUE)
+      sd_res <- stats::sd(a - p, na.rm = TRUE)
+      tags$div(class = "card", style = "background:#161b22; border-color:#30363d; margin-bottom:12px;",
+        tags$div(class = "card-body", style = "padding:14px 16px;",
+          tags$div(class = "studio-kicker", style = "margin-bottom:6px;",
+                    "METHODOLOGICAL SUMMARY"),
+          tags$div(style = "color:#c9d1d9; font-size:0.95em; line-height:1.6;",
+            sprintf("Test sample size n = %d. ", n),
+            sprintf("Primary metric 95%% CI: %s. ", ci_text),
+            sprintf("Residual mean (bias) = %.4f; residual SD = %.4f.",
+                    bias, sd_res),
+            tags$br(),
+            tags$small(class = "text-muted",
+              "Confidence intervals are non-parametric (R=200 bootstrap resamples)."))
+        ))
     })
 
     output$resid_fitted <- renderPlotly({
       d <- .pred_df()
-      plot_ly(x = d$predicted, y = d$residual, type = "scatter", mode = "markers",
-              marker = list(color = "#3fb950", opacity = 0.7)) |>
-        layout(title = "Residuals vs Fitted",
-               paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"),
-               xaxis = list(title = "Predicted"),
-               yaxis = list(title = "Residual"),
-               shapes = list(list(type = "line",
-                                  x0 = min(d$predicted, na.rm=TRUE),
-                                  x1 = max(d$predicted, na.rm=TRUE),
-                                  y0 = 0, y1 = 0,
-                                  line = list(dash = "dash", color = "#888"))))
+      col <- plot_theme_primary(state)
+      plotly_apply_theme(
+        plot_ly(x = d$predicted, y = d$residual, type = "scatter",
+                mode = "markers",
+                marker = list(color = col, opacity = 0.7)),
+        state,
+        extra = list(title = "Residuals vs Fitted",
+          xaxis = list(title = "Predicted"),
+          yaxis = list(title = "Residual"),
+          shapes = list(list(type = "line",
+                              x0 = min(d$predicted, na.rm=TRUE),
+                              x1 = max(d$predicted, na.rm=TRUE),
+                              y0 = 0, y1 = 0,
+                              line = list(dash = "dash", color = "#888")))))
     })
 
     output$resid_hist <- renderPlotly({
       r <- .residuals()
-      plot_ly(x = r, type = "histogram", nbinsx = 30,
-              marker = list(color = "#3fb950")) |>
-        layout(title = "Residual Histogram",
-               paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"),
-               xaxis = list(title = "Residual"))
+      plotly_apply_theme(
+        plot_ly(x = r, type = "histogram", nbinsx = 30,
+                marker = list(color = plot_theme_primary(state))),
+        state,
+        extra = list(title = "Residual Histogram",
+          xaxis = list(title = "Residual")))
     })
 
     output$resid_qq <- renderPlotly({
       r <- .residuals()
       r <- r[is.finite(r)]
-      if (length(r) < 3) return(plotly_empty())
+      if (length(r) < 3) return(plotly_apply_theme(plotly_empty(), state))
       qq <- qqnorm(r, plot.it = FALSE)
-      plot_ly(x = qq$x, y = qq$y, type = "scatter", mode = "markers",
-              marker = list(color = "#3fb950", opacity = 0.7)) |>
-        add_lines(x = c(min(qq$x), max(qq$x)),
-                  y = c(min(qq$y), max(qq$y)),
-                  line = list(dash = "dash", color = "#888"),
-                  showlegend = FALSE) |>
-        layout(title = "Q-Q (normality of residuals)",
-               paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"),
-               xaxis = list(title = "Theoretical"),
-               yaxis = list(title = "Sample"))
+      plotly_apply_theme(
+        plot_ly(x = qq$x, y = qq$y, type = "scatter", mode = "markers",
+                marker = list(color = plot_theme_primary(state),
+                                opacity = 0.7)) |>
+          add_lines(x = c(min(qq$x), max(qq$x)),
+                    y = c(min(qq$y), max(qq$y)),
+                    line = list(dash = "dash", color = "#888"),
+                    showlegend = FALSE),
+        state,
+        extra = list(title = "Q-Q (normality of residuals)",
+          xaxis = list(title = "Theoretical"),
+          yaxis = list(title = "Sample")))
     })
 
     output$resid_acf <- renderPlotly({
       r <- .residuals()
       r <- r[is.finite(r)]
-      if (length(r) < 5) return(plotly_empty())
+      if (length(r) < 5) return(plotly_apply_theme(plotly_empty(), state))
       lag.max <- min(20, length(r) - 1)
       ac <- acf(r, lag.max = lag.max, plot = FALSE)
       ci <- qnorm(0.975) / sqrt(length(r))
-      plot_ly(x = as.numeric(ac$lag), y = as.numeric(ac$acf), type = "bar",
-              marker = list(color = "#3fb950")) |>
-        layout(title = "Residual ACF (autocorrelation by lag)",
-               paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"),
-               xaxis = list(title = "Lag"),
-               yaxis = list(title = "ACF"),
-               shapes = list(
-                 list(type = "line", x0 = 0, x1 = lag.max, y0 = ci, y1 = ci,
-                      line = list(dash = "dash", color = "#d9534f")),
-                 list(type = "line", x0 = 0, x1 = lag.max, y0 = -ci, y1 = -ci,
-                      line = list(dash = "dash", color = "#d9534f"))))
+      pal <- plot_theme_palette(state, "qualitative", 2)
+      plotly_apply_theme(
+        plot_ly(x = as.numeric(ac$lag), y = as.numeric(ac$acf), type = "bar",
+                marker = list(color = pal[1])),
+        state,
+        extra = list(title = "Residual ACF (autocorrelation by lag)",
+          xaxis = list(title = "Lag"),
+          yaxis = list(title = "ACF"),
+          shapes = list(
+            list(type = "line", x0 = 0, x1 = lag.max, y0 = ci, y1 = ci,
+                 line = list(dash = "dash", color = pal[2])),
+            list(type = "line", x0 = 0, x1 = lag.max, y0 = -ci, y1 = -ci,
+                 line = list(dash = "dash", color = pal[2])))))
     })
 
     # ---- Searchable per-row predictions ----------------------------

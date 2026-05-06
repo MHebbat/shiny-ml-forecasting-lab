@@ -93,35 +93,34 @@ studio_server <- function(id, state) {
     studio_plot <- function(payload, height = 360) {
       d <- payload$preds
       if (is.null(d) || nrow(d) == 0) return(NULL)
-      meta <- payload$meta
-      is_ts <- !is.null(meta) && isTRUE(meta$task_type == "time_series")
       has_pi <- "lower" %in% names(d) && !all(is.na(d$lower))
       x <- seq_len(nrow(d))
+      pal <- plot_theme_palette(state, "qualitative", 3)
+      forecast_col <- pal[1]
+      actual_col   <- pal[3]
+      rgb <- grDevices::col2rgb(forecast_col)
+      pi_fill <- sprintf("rgba(%d,%d,%d,0.18)", rgb[1, 1], rgb[2, 1], rgb[3, 1])
       p <- plot_ly(height = height) |>
         plotly::add_lines(x = x, y = d$predicted, name = "Forecast",
-                          line = list(color = "#d4af37", width = 3))
+                          line = list(color = forecast_col, width = 3))
       if (has_pi) {
         p <- p |> plotly::add_ribbons(x = x, ymin = d$lower, ymax = d$upper,
                                        name = "PI",
-                                       fillcolor = "rgba(212,175,55,0.18)",
+                                       fillcolor = pi_fill,
                                        line = list(color = "transparent"))
       }
       if ("actual" %in% names(d) && !all(is.na(d$actual))) {
         p <- p |> plotly::add_lines(x = x, y = d$actual, name = "Actual",
-                                     line = list(color = "#c9d1d9",
+                                     line = list(color = actual_col,
                                                  width = 2, dash = "dot"))
       }
-      p |> plotly::layout(
-        paper_bgcolor = "#0d0d0f",
-        plot_bgcolor  = "#0d0d0f",
-        font = list(color = "#e8e6e0", family = "Inter"),
-        margin = list(l = 20, r = 20, t = 10, b = 30),
-        showlegend = FALSE,
-        xaxis = list(showgrid = FALSE, zeroline = FALSE,
-                     showline = FALSE, title = ""),
-        yaxis = list(gridcolor = "#1c1c20", zeroline = FALSE,
-                     showline = FALSE, title = "")
-      )
+      plotly_apply_theme(p, state,
+        extra = list(margin = list(l = 20, r = 20, t = 10, b = 30),
+                      showlegend = FALSE,
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE,
+                                    showline = FALSE, title = ""),
+                      yaxis = list(zeroline = FALSE,
+                                    showline = FALSE, title = "")))
     }
 
     # ---- Editorial UI -----------------------------------------------
@@ -251,6 +250,70 @@ studio_server <- function(id, state) {
       }
     )
 
+    # ---- Methods, limitations, references --------------------------
+    methods_text <- function(payload) {
+      meta <- payload$meta
+      run_row <- payload$run_row
+      params <- payload$params
+      preplog <- state$prep_log %||% list()
+      prep_md <- if (length(preplog) > 0)
+        paste0("- ", unlist(preplog), collapse = "\n") else
+        "- (none recorded; the raw frame was passed through directly)"
+      val_md <- {
+        v <- params$validation %||% params$strategy %||% "holdout"
+        sprintf("- Validation: %s\n- Train rows: %s\n- Test rows: %s",
+                v,
+                fmt_num(state$n_train %||% NA, 0),
+                fmt_num(length(state$last_model$predicted %||% c()), 0))
+      }
+      pieces <- c(
+        sprintf("**Data.** Target: `%s`. Frequency: `%s`. Task: `%s`.",
+                meta$target %||% "\u2014",
+                meta$frequency %||% "\u2014",
+                meta$task_type %||% "\u2014"),
+        sprintf("**Preprocessing recipe.**\n%s", prep_md),
+        sprintf("**Model.** `%s` \u2014 engine: `%s`.",
+                run_row$model_id[1] %||% "\u2014",
+                run_row$engine[1] %||% "R"),
+        sprintf("**Validation.**\n%s", val_md),
+        sprintf("**Software.** R %s; key packages: %s.",
+                getRversion(),
+                paste(c("shiny","ggplot2","plotly","dplyr","yardstick","recipes"),
+                      collapse = ", "))
+      )
+      paste(pieces, collapse = "\n\n")
+    }
+    limitations_text <- function(payload) {
+      meta <- payload$meta
+      pieces <- c(
+        "Reported metrics describe out-of-sample performance under the validation strategy named above; they do not constitute a guarantee of generalisation to data with materially different distribution or sampling design.",
+        "Confidence intervals on metrics, where shown, are point estimates from the holdout / resampling fold and are sensitive to sample size.",
+        if (!is.null(meta) && isTRUE(meta$task_type == "time_series"))
+          "Time-series forecasts are conditional on the training-window structure and assume the data-generating process is stationary across the forecast horizon. Regime shifts or structural breaks may invalidate the prediction interval."
+        else
+          "For tabular models, leakage between predictors and target may inflate apparent performance; the Data Prep tab's leakage scan flags candidates but cannot rule out semantic leakage."
+      )
+      paste(pieces, collapse = "\n\n")
+    }
+    references_text <- function() {
+      pkgs <- c("base", "stats", "ggplot2", "dplyr", "tidyr", "plotly",
+                "shiny", "bslib", "DT", "yardstick", "recipes",
+                "ranger", "xgboost", "glmnet", "forecast")
+      pkgs <- pkgs[vapply(pkgs, function(p)
+        requireNamespace(p, quietly = TRUE), logical(1))]
+      cites <- vapply(pkgs, function(p) {
+        c <- tryCatch(utils::citation(p)[[1]], error = function(e) NULL)
+        if (is.null(c)) return("")
+        # Distil the citation into a single line.
+        a <- paste(format(c$author %||% "", "  "), collapse = " ")
+        sprintf("- %s (%s). %s. R package version %s.",
+                a, c$year %||% "\u2014", c$title %||% p,
+                tryCatch(as.character(utils::packageVersion(p)),
+                          error = function(e) "\u2014"))
+      }, character(1))
+      paste(cites[nzchar(cites)], collapse = "\n")
+    }
+
     output$export_html <- downloadHandler(
       filename = function()
         sprintf("studio_run%s_%s.html",
@@ -258,7 +321,6 @@ studio_server <- function(id, state) {
                 format(Sys.time(), "%Y%m%d_%H%M%S")),
       content = function(file) {
         payload <- studio_payload()
-        # Build a self-contained HTML keepsake
         css_path <- file.path(.app_root(), "www", "studio.css")
         css <- if (file.exists(css_path)) readLines(css_path, warn = FALSE) else ""
         css <- paste(css, collapse = "\n")
@@ -275,11 +337,39 @@ studio_server <- function(id, state) {
         headline <- if (!is.null(analysis) && nzchar(analysis$verdict %||% ""))
           analysis$verdict else sprintf("%s on %s", run_row$model_id[1],
                                         run_row$task_type[1] %||% "")
+
+        md_to_html <- function(md) {
+          if (!nzchar(md)) return("")
+          # Minimal markdown -> HTML (bold, paragraphs, lists).
+          html <- htmltools::htmlEscape(md)
+          html <- gsub("\\*\\*([^*]+)\\*\\*", "<b>\\1</b>", html)
+          html <- gsub("`([^`]+)`", "<code>\\1</code>", html)
+          paras <- strsplit(html, "\n\n", fixed = TRUE)[[1]]
+          paste(vapply(paras, function(p) {
+            if (grepl("^- ", p)) {
+              items <- strsplit(p, "\n", fixed = TRUE)[[1]]
+              items <- sub("^- ", "", items)
+              paste0("<ul>",
+                     paste(sprintf("<li>%s</li>", items), collapse = ""),
+                     "</ul>")
+            } else paste0("<p>", gsub("\n", "<br>", p, fixed = TRUE), "</p>")
+          }, character(1)), collapse = "\n")
+        }
+
+        methods_html     <- md_to_html(methods_text(payload))
+        limitations_html <- md_to_html(limitations_text(payload))
+        refs_html        <- md_to_html(references_text())
+
         body_html <- sprintf('
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <title>The Forecast \u2014 Run %s</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;900&family=Inter:wght@300;400;500;600&display=swap">
-<style>%s body{background:#0d0d0f;}</style>
+<style>%s body{background:#0d0d0f;}
+.studio-section{margin:40px 0;}
+.studio-section h2{font-family:"Playfair Display",serif;color:#e8e6e0;margin:0 0 8px;font-size:1.3em;}
+.studio-section p, .studio-section li{color:#c9d1d9;font-family:Inter,sans-serif;line-height:1.6;}
+.studio-section code{background:#1c1c20;padding:1px 5px;border-radius:3px;}
+</style>
 </head><body><div class="studio-shell"><div class="studio-page studio-cover">
 <div class="studio-hero">
   <div class="studio-hero-meta">
@@ -287,10 +377,15 @@ studio_server <- function(id, state) {
     <span class="studio-kicker">%s</span>
   </div>
   <h1 class="studio-headline">%s</h1>
-  <p class="studio-deck">%s issued on %s. Model %s.</p>
+  <p class="studio-deck">Target: %s. Issued %s. Model: %s.</p>
   <div class="studio-rule"></div>
 </div>
 <div class="studio-metric-grid">%s</div>
+
+<div class="studio-section"><h2>Methods</h2>%s</div>
+<div class="studio-section"><h2>Limitations</h2>%s</div>
+<div class="studio-section"><h2>References</h2>%s</div>
+
 <div class="studio-footer">
   <span class="studio-byline">Author \u2014 Malik Hebbat</span>
   <span class="studio-byline-sep">|</span>
@@ -305,6 +400,9 @@ studio_server <- function(id, state) {
           format(Sys.time(), "%B %d, %Y"),
           htmltools::htmlEscape(run_row$model_id[1] %||% ""),
           metric_html,
+          methods_html,
+          limitations_html,
+          refs_html,
           payload$run_id)
         writeLines(body_html, file)
       }

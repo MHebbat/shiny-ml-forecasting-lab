@@ -101,11 +101,13 @@ explore_ui <- function(id) {
             tags$span(class = "studio-dot", "•"),
             tags$span(class = "studio-kicker", "READ-ONLY DIAGNOSTICS")
           ),
-          tags$h1(class = "studio-headline", "Look before you leap."),
+          tags$h1(class = "studio-headline",
+                  "Exploratory Data Analysis."),
           tags$p(class = "studio-deck",
-            "Inspect your raw data: distributions, correlations, missingness, sample rows. ",
-            "Nothing is changed here. When you're ready to clean it up, head to ",
-            tags$b("Data Prep"), "."
+            "Univariate distributions, missingness profile, correlation ",
+            "structure, outlier diagnostics. Read-only — no transformations ",
+            "are applied here. Continue to ", tags$b("Data Prep"),
+            " to define the preprocessing recipe."
           ),
           tags$div(class = "studio-rule"),
           tags$div(style = "margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;",
@@ -223,29 +225,33 @@ explore_server <- function(id, state, parent_session = NULL) {
         pct = sapply(state$raw_data, function(c) mean(is.na(c)))*100
       )
       m <- m[order(-m$pct), ]
-      plot_ly(m, x = ~pct, y = ~reorder(column, pct), type = "bar", orientation = "h",
-              marker = list(color = "#3fb950")) |>
-        layout(xaxis = list(title = "% missing"), yaxis = list(title = ""),
-               paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"))
+      plotly_apply_theme(
+        plot_ly(m, x = ~pct, y = ~reorder(column, pct),
+                type = "bar", orientation = "h",
+                marker = list(color = plot_theme_primary(state))),
+        state,
+        extra = list(xaxis = list(title = "% missing"),
+                      yaxis = list(title = "")))
     })
 
     # Target distribution
     output$target_plot <- renderPlotly({
       req(state$raw_data, state$meta)
       y <- state$raw_data[[state$meta$target]]
+      col <- plot_theme_primary(state)
       if (is.numeric(y)) {
-        plot_ly(x = y, type = "histogram", marker = list(color = "#3fb950")) |>
-          layout(title = paste("Distribution of", state$meta$target),
-                 paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                 font = list(color = "#c9d1d9"))
+        plotly_apply_theme(
+          plot_ly(x = y, type = "histogram",
+                  marker = list(color = col)),
+          state,
+          extra = list(title = paste("Distribution of", state$meta$target)))
       } else {
         d <- as.data.frame(table(y))
-        plot_ly(d, x = ~y, y = ~Freq, type = "bar",
-                marker = list(color = "#3fb950")) |>
-          layout(title = paste("Counts of", state$meta$target),
-                 paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                 font = list(color = "#c9d1d9"))
+        plotly_apply_theme(
+          plot_ly(d, x = ~y, y = ~Freq, type = "bar",
+                  marker = list(color = col)),
+          state,
+          extra = list(title = paste("Counts of", state$meta$target)))
       }
     })
 
@@ -274,33 +280,32 @@ explore_server <- function(id, state, parent_session = NULL) {
 
     output$cor_plot <- renderPlotly({
       r <- cor_result()
-      if (!isTRUE(r$ok)) return(plotly_empty(type = "scatter") |>
-        layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9")))
+      if (!isTRUE(r$ok)) return(plotly_apply_theme(
+        plotly_empty(type = "scatter"), state))
       C <- r$matrix
-      # Heatmap with cell text (no extra package dependency)
       txt <- formatC(C, format = "f", digits = 2)
-      plot_ly(
-        x = colnames(C), y = colnames(C), z = C,
-        type = "heatmap",
-        text = txt, hovertemplate = "%{x} ↔ %{y}<br>r = %{z:.3f}<extra></extra>",
-        zmin = -1, zmax = 1,
-        colorscale = list(
-          c(0,   "#d9534f"),
-          c(0.5, "#0d1117"),
-          c(1,   "#3fb950"))
-      ) |>
-        add_annotations(
-          x = rep(colnames(C), each = nrow(C)),
-          y = rep(rownames(C), times = ncol(C)),
-          text = as.vector(txt),
-          showarrow = FALSE,
-          font = list(size = 10, color = "#c9d1d9")
+      div_pal <- plot_theme_palette(state, "diverging", 11)
+      cs <- lapply(seq_along(div_pal),
+                    function(i) c((i - 1) / (length(div_pal) - 1), div_pal[i]))
+      anno_color <- if (plot_theme_id(state) == "studio") "#c9d1d9" else "#222"
+      plotly_apply_theme(
+        plot_ly(
+          x = colnames(C), y = colnames(C), z = C,
+          type = "heatmap",
+          text = txt, hovertemplate = "%{x} ↔ %{y}<br>r = %{z:.3f}<extra></extra>",
+          zmin = -1, zmax = 1,
+          colorscale = cs
         ) |>
-        layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-               font = list(color = "#c9d1d9"),
-               xaxis = list(tickangle = -45),
-               margin = list(l = 80, b = 80))
+          add_annotations(
+            x = rep(colnames(C), each = nrow(C)),
+            y = rep(rownames(C), times = ncol(C)),
+            text = as.vector(txt),
+            showarrow = FALSE,
+            font = list(size = 10, color = anno_color)
+          ),
+        state,
+        extra = list(xaxis = list(tickangle = -45),
+                      margin = list(l = 80, b = 80)))
     })
 
     output$cor_pairs <- DT::renderDT({

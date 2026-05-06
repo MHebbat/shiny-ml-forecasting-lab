@@ -53,6 +53,7 @@ The launcher checks for `Rscript`, installs missing R packages (idempotent), and
 - **Persistence**: every run, hyperparameter set, prediction, and AI analysis is stored in `db/app.sqlite`
 - **Leaderboard**: compare runs across datasets / models / metrics
 - **Dark theme** (`bslib` darkly + custom CSS)
+- **Plot themes** — Studio (dark editorial) · Light minimal · **Bundesbank**. The Bundesbank theme reproduces the Deutsche Bundesbank Monthly Report look (corporate dark blue `#003D7C`, secondary red `#B61F29`, ochre, teal, neutral grey, light grey gridlines, Inter typography, white background). Switch globally from the navbar — every chart in Explore / Data Prep / Predict / Dashboard / Editorial Studio re-renders in the active theme.
 
 ## Deep learning models
 
@@ -62,17 +63,22 @@ Two deep-learning models ship with the Training Studio. Both are *optional* — 
 
 Recurrent network with gating that captures long-range dependencies in sequences. Primary task: **time-series forecasting**. Secondary: **sequence classification**. The Training Studio exposes the full deep-learning block: optimizer (adam / sgd / rmsprop / adamw), learning rate + weight decay, batch size, epochs, validation split, early-stopping patience and restore-best-weights, LR scheduler (none / step / cosine / reduce-on-plateau), loss override, mixed-precision toggle, gradient clipping (off / value / norm), and the LSTM-specific knobs: timesteps, n_features (auto-detected from the prepped frame), stateful, return_sequences, bidirectional, stacked layers (1..4), dropout, recurrent_dropout.
 
-**Backend.** Primary: R [`keras`](https://keras.posit.co/) (Keras + TensorFlow via `reticulate`). Fallback for univariate time series: [`TSLSTMplus`](https://cran.r-project.org/package=TSLSTMplus). Install:
+**Backend.** Primary: R [`keras3`](https://keras3.posit.co/) (current CRAN package, Keras 3 + TensorFlow via `reticulate`). Legacy fallback: the older R [`keras`](https://keras.posit.co/) package. Univariate-only fallback: [`TSLSTMplus`](https://cran.r-project.org/package=TSLSTMplus). Install:
 
 ```r
-install.packages("keras")
-keras::install_keras()         # provisions the Python TF runtime once
+# Recommended — current Keras 3 stack
+install.packages("keras3")
+keras3::install_keras()        # provisions the Python TF runtime once
+# restart R / the app afterwards
 
-# (optional fallback for univariate-only series)
+# Legacy fallback (if you already have it set up)
+# install.packages("keras"); keras::install_keras()
+
+# Univariate-only fallback, no Python required
 install.packages("TSLSTMplus")
 ```
 
-If neither package is available the UI displays a clear "missing dependency" notice and the model is disabled until you install one of them.
+The Model Lab's availability panel surfaces the exact reason when the model is unavailable: missing R package, missing TensorFlow Python backend, or both. The Train button refuses with the same actionable message rather than crashing the session.
 
 ### KAN (Kolmogorov–Arnold Network) — BETA
 

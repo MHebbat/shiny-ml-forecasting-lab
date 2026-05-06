@@ -95,9 +95,48 @@ avail_python <- function(mod, hint = NULL) {
   if (length(v) == 0) NULL else v
 }
 
-# Build sequence (X, y) tensors for LSTM training from a numeric vector.
-# Returns list(X = [N x T x 1], y = [N], idx_last = N) suitable for keras.
-.lstm_make_supervised <- function(y, timesteps) {
+# Build sequence (X, y) tensors for LSTM training from a univariate numeric
+# vector or a multivariate matrix.
+#
+# Inputs:
+#   y         numeric vector (univariate) OR numeric matrix [n_obs, n_features]
+#   timesteps number of past steps to feed at each prediction
+#   target_col when y is a matrix, the column index of the supervised target
+#              (defaults to the LAST column).
+#
+# Returns list(
+#   X       = array [N, timesteps, n_features],
+#   y       = numeric vector length N,
+#   N       = N,
+#   n_features = n_features,
+#   timesteps  = timesteps
+# )
+# Pure R; no keras dependency. Exposed (no leading dot) so it can be unit
+# tested.
+lstm_make_supervised <- function(y, timesteps, target_col = NULL) {
+  if (!is.numeric(timesteps) || length(timesteps) != 1 ||
+      !is.finite(timesteps) || timesteps < 1)
+    stop("lstm_make_supervised: `timesteps` must be a positive integer")
+  timesteps <- as.integer(timesteps)
+  if (is.matrix(y) || is.data.frame(y)) {
+    M <- as.matrix(y)
+    storage.mode(M) <- "double"
+    if (any(!is.finite(M)))
+      stop("lstm_make_supervised: NA / non-finite values in input matrix")
+    n <- nrow(M); n_features <- ncol(M)
+    if (is.null(target_col)) target_col <- n_features
+    if (n <= timesteps)
+      stop("LSTM: series too short for the requested timesteps")
+    N <- n - timesteps
+    X <- array(0, dim = c(N, timesteps, n_features))
+    yy <- numeric(N)
+    for (i in seq_len(N)) {
+      X[i, , ] <- M[i:(i + timesteps - 1L), , drop = FALSE]
+      yy[i]    <- M[i + timesteps, target_col]
+    }
+    return(list(X = X, y = yy, N = N,
+                n_features = n_features, timesteps = timesteps))
+  }
   y <- as.numeric(y)
   n <- length(y)
   if (n <= timesteps) stop("LSTM: series too short for the requested timesteps")
@@ -108,7 +147,41 @@ avail_python <- function(mod, hint = NULL) {
     X[i, , 1] <- y[i:(i + timesteps - 1L)]
     yy[i]     <- y[i + timesteps]
   }
-  list(X = X, y = yy)
+  list(X = X, y = yy, N = N, n_features = 1L, timesteps = timesteps)
+}
+# Back-compat alias (older callers used the dot-prefixed private name).
+.lstm_make_supervised <- lstm_make_supervised
+
+# ---- Keras backend resolution ---------------------------------------
+# Returns a list:
+#   ok      TRUE if a usable backend was found
+#   backend "keras3" | "keras" | NA
+#   ns      a list with namespaced functions to call (allows uniform code
+#           paths between keras3 and the legacy keras package)
+#   reason  human-readable string when !ok
+#
+# We prefer keras3 (current CRAN package) and fall back to legacy keras.
+# Both must additionally have a working TensorFlow Python backend.
+.resolve_keras_backend <- function() {
+  has_tf <- function() {
+    if (!requireNamespace("reticulate", quietly = TRUE)) return(FALSE)
+    tryCatch(reticulate::py_module_available("tensorflow"),
+             error = function(e) FALSE)
+  }
+  if (.has("keras3")) {
+    if (!has_tf()) return(list(ok = FALSE, backend = "keras3", ns = NULL,
+      reason = "R package `keras3` is installed but TensorFlow is not configured. Run keras3::install_keras() once and restart."))
+    return(list(ok = TRUE, backend = "keras3",
+                ns = asNamespace("keras3"), reason = NULL))
+  }
+  if (.has("keras")) {
+    if (!has_tf()) return(list(ok = FALSE, backend = "keras", ns = NULL,
+      reason = "R package `keras` is installed but TensorFlow is not configured. Run keras::install_keras() once and restart."))
+    return(list(ok = TRUE, backend = "keras",
+                ns = asNamespace("keras"), reason = NULL))
+  }
+  list(ok = FALSE, backend = NA, ns = NULL,
+       reason = "Neither `keras3` (preferred) nor `keras` is installed. Install one with `install.packages('keras3'); keras3::install_keras()` and restart.")
 }
 
 # ---- Model implementations -------------------------------------------
@@ -552,14 +625,15 @@ fit_catboost_py <- function(df, target, params, time_col = NULL, classification 
 }
 
 # ---- LSTM (deep learning) --------------------------------------------
-# Two backends:
-#   - keras: full-featured (preferred). Uses R `keras` package + Python TF.
-#   - TSLSTMplus: univariate convenience fallback for time series only.
+# Backends, in order of preference:
+#   - keras3 (CRAN, current): full-featured, recommended.
+#   - keras  (legacy RStudio): full-featured fallback.
+#   - TSLSTMplus: univariate-only convenience fallback for time-series.
 # fit_lstm dispatches between them based on availability and task.
 fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE) {
   task <- if (classification) "classification" else "time_series"
 
-  use_keras <- .has("keras")
+  k <- .resolve_keras_backend()       # list(ok, backend, ns, reason)
   use_tslstm <- .has("TSLSTMplus")
 
   timesteps <- as.integer(params$timesteps %||% 12)
@@ -584,17 +658,67 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
     if (classification) "sparse_categorical_crossentropy" else "mse"
   }
 
-  # ---- Path 1: keras --------------------------------------------------
-  if (use_keras) {
+  # Uniform getter against either keras3 or keras namespace.
+  K <- function(name) {
+    if (is.null(k$ns)) stop("Keras backend not available")
+    fn <- get0(name, envir = k$ns, mode = "function")
+    if (is.null(fn)) stop(sprintf("Function `%s` missing in backend `%s`",
+                                   name, k$backend))
+    fn
+  }
+
+  set_seeds <- function() {
+    set.seed(seed)
+    # Both keras3 and keras expose set_random_seed; keras3 is the
+    # documented modern API. Fall back to use_session_with_seed only if
+    # set_random_seed is missing (very old keras).
+    fn <- get0("set_random_seed", envir = k$ns, mode = "function")
+    if (!is.null(fn)) tryCatch(fn(seed), error = function(e) NULL)
+    else {
+      fn <- get0("use_session_with_seed", envir = k$ns, mode = "function")
+      if (!is.null(fn))
+        tryCatch(fn(seed, disable_parallel_cpu = FALSE),
+                 error = function(e) NULL)
+    }
+  }
+
+  # ---- Path 1: keras3 / keras ----------------------------------------
+  if (isTRUE(k$ok)) {
     out <- tryCatch({
+      set_seeds()
       y_raw <- df[[target]]
+      build_optimizer <- function() {
+        switch(opt,
+          "sgd"     = K("optimizer_sgd")(learning_rate = lr),
+          "rmsprop" = K("optimizer_rmsprop")(learning_rate = lr),
+          "adamw"   = {
+            f <- get0("optimizer_adamw", envir = k$ns, mode = "function")
+            if (is.null(f)) K("optimizer_adam")(learning_rate = lr)
+            else f(learning_rate = lr)
+          },
+          K("optimizer_adam")(learning_rate = lr))
+      }
+      build_lstm_layer <- function(rs) {
+        K("layer_lstm")(units = units, return_sequences = rs,
+                          dropout = dropout, recurrent_dropout = rdrop,
+                          stateful = stateful)
+      }
+      build_callbacks <- function() {
+        cb <- list()
+        if (patience > 0)
+          cb <- c(cb, list(K("callback_early_stopping")(
+            monitor = "loss", patience = patience,
+            restore_best_weights = TRUE)))
+        if (sched == "reduce_on_plateau")
+          cb <- c(cb, list(K("callback_reduce_lr_on_plateau")(
+            monitor = "loss", patience = max(1L, patience %/% 2L))))
+        cb
+      }
       if (classification) {
-        # Treat as sequence classification on a flat numeric matrix; for now
-        # we only support univariate sequences (target supervised by lagged
-        # features). Encode classes for sparse loss.
+        # Sequence classification on a flat numeric matrix; multivariate
+        # supported. Encode classes for sparse loss.
         classes <- sort(unique(stats::na.omit(y_raw)))
         y_idx <- match(y_raw, classes) - 1L
-        # Build features: lagged target values (flat tabular if available)
         feat_cols <- setdiff(names(df), target)
         X_tab <- if (length(feat_cols) > 0)
           as.matrix(as.data.frame(lapply(df[, feat_cols, drop = FALSE],
@@ -608,41 +732,21 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
         ytr <- as.integer(y_idx)
         n_classes <- length(classes)
 
-        keras::use_session_with_seed(seed, disable_parallel_cpu = FALSE)
-        inp <- keras::layer_input(shape = c(1L, n_features))
+        inp <- K("layer_input")(shape = c(1L, n_features))
         z <- inp
         for (li in seq_len(layers_n)) {
           rs <- if (li < layers_n) TRUE else return_sequences
-          rec <- keras::layer_lstm(units = units, return_sequences = rs,
-                                   dropout = dropout,
-                                   recurrent_dropout = rdrop,
-                                   stateful = stateful)
-          z <- if (bidirectional) keras::bidirectional(z, rec) else rec(z)
+          rec <- build_lstm_layer(rs)
+          z <- if (bidirectional) K("bidirectional")(z, rec) else rec(z)
         }
-        out_layer <- keras::layer_dense(units = n_classes, activation = "softmax")
+        out_layer <- K("layer_dense")(units = n_classes, activation = "softmax")
         out_t <- out_layer(z)
-        model <- keras::keras_model(inp, out_t)
-        opt_obj <- switch(opt,
-          "sgd"   = keras::optimizer_sgd(learning_rate = lr),
-          "rmsprop" = keras::optimizer_rmsprop(learning_rate = lr),
-          "adamw" = if (utils::packageVersion("keras") >= "2.10")
-                       keras::optimizer_adam(learning_rate = lr)
-                    else keras::optimizer_adam(learning_rate = lr),
-          keras::optimizer_adam(learning_rate = lr))
-        model$compile(optimizer = opt_obj,
+        model <- K("keras_model")(inp, out_t)
+        model$compile(optimizer = build_optimizer(),
                       loss = loss_for_task(),
                       metrics = list("accuracy"))
-        cb <- list()
-        if (patience > 0)
-          cb <- c(cb, list(keras::callback_early_stopping(
-            monitor = "loss", patience = patience,
-            restore_best_weights = TRUE)))
-        if (sched == "reduce_on_plateau")
-          cb <- c(cb, list(keras::callback_reduce_lr_on_plateau(
-            monitor = "loss", patience = max(1L, patience %/% 2L))))
         hist <- model$fit(Xtr, ytr, epochs = epochs, batch_size = batch,
-                          verbose = 0L, callbacks = cb)
-        train_cols <- if (length(feat_cols) > 0) feat_cols else NULL
+                          verbose = 0L, callbacks = build_callbacks())
 
         list(model = model,
              predict = function(newdata, h = NULL) {
@@ -651,7 +755,6 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
                  nx <- as.data.frame(lapply(newdata[, keep, drop = FALSE],
                    function(c) if (is.factor(c)||is.character(c))
                      as.integer(as.factor(c)) else as.numeric(c)))
-                 # Pad missing columns with 0
                  for (m in setdiff(feat_cols, keep)) nx[[m]] <- 0
                  nx <- nx[, feat_cols, drop = FALSE]
                  Xn <- array(as.numeric(as.matrix(nx)),
@@ -666,72 +769,104 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
              },
              feat_imp = NULL,
              diagnostics = list(
-               backend = "keras",
+               backend = k$backend,
                epochs_run = length(hist$history$loss %||% list()),
                final_loss = utils::tail(hist$history$loss %||% list(NA), 1)[[1]],
                history = hist$history))
       } else {
-        # Time series / regression-on-sequence
-        y <- as.numeric(df[[target]])
-        sup <- .lstm_make_supervised(y, timesteps)
-        n_features <- 1L
+        # Time series / regression-on-sequence. Supports either univariate
+        # (target only) or multivariate (target + numeric features).
+        feat_cols <- setdiff(names(df), c(target, time_col %||% character(0)))
+        feat_cols <- feat_cols[vapply(feat_cols,
+          function(nm) is.numeric(df[[nm]]) || is.logical(df[[nm]]),
+          logical(1))]
+        if (length(feat_cols) > 0) {
+          M <- as.matrix(cbind(
+            as.data.frame(lapply(df[, feat_cols, drop = FALSE], as.numeric)),
+            setNames(list(as.numeric(df[[target]])), target)))
+          # Drop incomplete rows
+          ok <- complete.cases(M)
+          M <- M[ok, , drop = FALSE]
+          sup <- lstm_make_supervised(M, timesteps,
+                                       target_col = ncol(M))
+        } else {
+          y <- as.numeric(stats::na.omit(df[[target]]))
+          sup <- lstm_make_supervised(y, timesteps)
+        }
+        n_features <- sup$n_features
 
-        keras::use_session_with_seed(seed, disable_parallel_cpu = FALSE)
-        inp <- keras::layer_input(shape = c(timesteps, n_features))
+        inp <- K("layer_input")(shape = c(timesteps, n_features))
         z <- inp
         for (li in seq_len(layers_n)) {
           rs <- if (li < layers_n) TRUE else return_sequences
-          rec <- keras::layer_lstm(units = units, return_sequences = rs,
-                                   dropout = dropout,
-                                   recurrent_dropout = rdrop,
-                                   stateful = stateful)
-          z <- if (bidirectional) keras::bidirectional(z, rec) else rec(z)
+          rec <- build_lstm_layer(rs)
+          z <- if (bidirectional) K("bidirectional")(z, rec) else rec(z)
         }
-        out_t <- keras::layer_dense(units = 1L)(z)
-        model <- keras::keras_model(inp, out_t)
-        opt_obj <- switch(opt,
-          "sgd"   = keras::optimizer_sgd(learning_rate = lr),
-          "rmsprop" = keras::optimizer_rmsprop(learning_rate = lr),
-          keras::optimizer_adam(learning_rate = lr))
-        model$compile(optimizer = opt_obj, loss = loss_for_task())
-        cb <- list()
-        if (patience > 0)
-          cb <- c(cb, list(keras::callback_early_stopping(
-            monitor = "loss", patience = patience,
-            restore_best_weights = TRUE)))
-        if (sched == "reduce_on_plateau")
-          cb <- c(cb, list(keras::callback_reduce_lr_on_plateau(
-            monitor = "loss", patience = max(1L, patience %/% 2L))))
+        out_t <- K("layer_dense")(units = 1L)(z)
+        model <- K("keras_model")(inp, out_t)
+        model$compile(optimizer = build_optimizer(), loss = loss_for_task())
         hist <- model$fit(sup$X, sup$y, epochs = epochs, batch_size = batch,
-                          verbose = 0L, callbacks = cb)
+                          verbose = 0L, callbacks = build_callbacks())
 
-        # Cache training tail for forecasting
-        last_window <- utils::tail(y, timesteps)
+        # Cache the last training window for recursive forecasting
+        last_window <- if (n_features == 1L) {
+          utils::tail(as.numeric(sup$y), timesteps - 1)
+          # use original supervised tail: rebuild from sup
+          tmp <- if (sup$N > 0) {
+            c(sup$X[sup$N, , 1], sup$y[sup$N])
+          } else stop("LSTM: empty supervised set")
+          utils::tail(tmp, timesteps)
+        } else {
+          # Multivariate: reuse the last `timesteps` rows of the input matrix
+          M <- as.matrix(cbind(
+            as.data.frame(lapply(df[, feat_cols, drop = FALSE], as.numeric)),
+            setNames(list(as.numeric(df[[target]])), target)))
+          ok <- complete.cases(M)
+          M <- M[ok, , drop = FALSE]
+          utils::tail(M, timesteps)
+        }
 
         list(model = model,
              predict = function(newdata = NULL, h = 12) {
-               # Recursive multi-step forecast from last training window
                yhat <- numeric(0)
-               window <- last_window
-               for (i in seq_len(h)) {
-                 Xn <- array(window, dim = c(1L, timesteps, 1L))
-                 p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
-                 yhat <- c(yhat, p)
-                 window <- c(window[-1], p)
+               if (n_features == 1L) {
+                 win <- last_window
+                 for (i in seq_len(h)) {
+                   Xn <- array(win, dim = c(1L, timesteps, 1L))
+                   p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
+                   yhat <- c(yhat, p)
+                   win <- c(win[-1], p)
+                 }
+               } else {
+                 # Recursive forecast: at each step, predict next y, then
+                 # roll the window forward holding feature columns at their
+                 # last observed values (a common, conservative assumption).
+                 win <- last_window
+                 last_feat <- win[nrow(win), -ncol(win)]
+                 for (i in seq_len(h)) {
+                   Xn <- array(as.numeric(win),
+                               dim = c(1L, timesteps, n_features))
+                   p <- as.numeric(model$predict(Xn, verbose = 0L))[1]
+                   yhat <- c(yhat, p)
+                   new_row <- c(last_feat, p)
+                   win <- rbind(win[-1, , drop = FALSE], new_row)
+                 }
                }
                data.frame(predicted = yhat, lower = NA_real_, upper = NA_real_)
              },
              feat_imp = NULL,
              diagnostics = list(
-               backend = "keras",
+               backend = k$backend,
                timesteps = timesteps,
+               n_features = n_features,
                epochs_run = length(hist$history$loss %||% list()),
                final_loss = utils::tail(hist$history$loss %||% list(NA), 1)[[1]],
                history = hist$history))
       }
     }, error = function(e) {
-      message("LSTM keras backend failed: ", conditionMessage(e),
-              " — falling back to TSLSTMplus if available.")
+      message("LSTM keras backend (", k$backend, ") failed: ",
+              conditionMessage(e),
+              " - falling back to TSLSTMplus if available.")
       NULL
     })
     if (!is.null(out)) return(out)
@@ -760,7 +895,12 @@ fit_lstm <- function(df, target, params, time_col = NULL, classification = FALSE
     ))
   }
 
-  stop("LSTM unavailable: install R 'keras' (with Python TensorFlow) or 'TSLSTMplus'")
+  reason <- if (!isTRUE(k$ok)) k$reason else
+    "Neither `keras3`/`keras` nor `TSLSTMplus` is usable in this session."
+  stop(paste0("LSTM unavailable: ", reason,
+              "\n  Recommended setup: install.packages('keras3'); ",
+              "keras3::install_keras(); then restart the app.",
+              "\n  Univariate-only fallback: install.packages('TSLSTMplus')."))
 }
 
 # ---- KAN (Kolmogorov-Arnold Network) ---------------------------------
@@ -1294,17 +1434,23 @@ MODELS <- list(
             fn = fit_lstm,
             beta = FALSE,
             available = function() {
-              if (.has("keras")) return(avail_ok())
+              k <- .resolve_keras_backend()
+              if (isTRUE(k$ok)) return(list(ok = TRUE,
+                msg = sprintf("Using `%s` backend with TensorFlow.", k$backend)))
               if (.has("TSLSTMplus")) return(list(ok = TRUE,
-                msg = "Using TSLSTMplus fallback (univariate). Install 'keras' for full features."))
+                msg = paste0("Using TSLSTMplus fallback (univariate only). ",
+                             k$reason %||% "",
+                             " Install keras3 + TF for full features.")))
               list(ok = FALSE,
                    msg = paste0(
-                     "LSTM requires R 'keras' (Keras + TensorFlow via reticulate) ",
-                     "or 'TSLSTMplus' for univariate fallback. Run ",
-                     "install.packages('keras'); keras::install_keras() to enable."))
+                     k$reason %||%
+                       "LSTM requires `keras3` (recommended) or `keras` with a Python TensorFlow backend, or `TSLSTMplus` for univariate fallback.",
+                     " Run: install.packages('keras3'); keras3::install_keras(); then restart the app."))
             },
-            reference_url = "https://keras.posit.co/",
-            dependencies = c("R: keras (with Python tensorflow)", "R: TSLSTMplus (optional fallback)"),
+            reference_url = "https://keras3.posit.co/",
+            dependencies = c("R: keras3 (preferred, with Python tensorflow)",
+                              "R: keras (legacy fallback)",
+                              "R: TSLSTMplus (univariate fallback)"),
             description = paste(
               "LSTM (Long Short-Term Memory). Recurrent neural network with gating that captures long-range",
               "dependencies in sequences. Strong choice when you have genuine sequential structure",

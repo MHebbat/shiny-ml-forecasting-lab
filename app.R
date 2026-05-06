@@ -34,6 +34,7 @@ suppressPackageStartupMessages({
 # ---- Source modules ---------------------------------------------------
 source("R/db.R", local = TRUE)
 source("R/utils.R", local = TRUE)
+source("R/themes_plot.R", local = TRUE)
 source("R/recipe_builder.R", local = TRUE)
 source("R/model_registry.R", local = TRUE)
 source("R/python_bridge.R", local = TRUE)
@@ -136,6 +137,22 @@ ui <- page_navbar(
   ),
   nav_spacer(),
   nav_item(
+    tags$div(style = "display:flex; align-items:center; gap:6px; margin-right:8px;",
+      tags$span(class = "studio-kicker",
+                style = "font-size:0.7em; color:#8b949e;", "PLOT THEME"),
+      selectInput("global_plot_theme", NULL,
+                   choices = c("Studio (dark)" = "studio",
+                                "Light minimal" = "light",
+                                "Bundesbank" = "bundesbank"),
+                   selected = "studio",
+                   width = "150px"),
+      tags$div(id = "plot_theme_swatch",
+               style = "width:60px; height:18px; border:1px solid #30363d;",
+               plotly::plotlyOutput("plot_theme_preview",
+                                      width = "60px", height = "18px"))
+    )
+  ),
+  nav_item(
     tags$span(
       class = "badge bg-secondary",
       style = "margin-right:8px;",
@@ -174,12 +191,21 @@ server <- function(input, output, session) {
     n_train         = NULL,
     privacy_allow_ai = TRUE,   # AI egress gate
     prep_log        = list(),  # applied prep steps
-    survey_design   = NULL     # declared survey design
+    survey_design   = NULL,    # declared survey design
+    plot_theme      = "studio" # active plot theme: studio | light | bundesbank
   )
 
   # Show python availability status in navbar
   output$py_status <- renderText({
     if (py_is_available()) "Python: ready" else "Python: optional"
+  })
+
+  # ---- Plot theme: keep state$plot_theme in sync + render preview ----
+  observe({
+    state$plot_theme <- input$global_plot_theme %||% "studio"
+  })
+  output$plot_theme_preview <- plotly::renderPlotly({
+    plot_theme_preview(input$global_plot_theme %||% "studio")
   })
 
   ingest_server("ingest", state)

@@ -161,3 +161,33 @@ horizon_label <- function(freq, h) {
 flash <- function(msg, type = "default") {
   showNotification(msg, type = type, duration = 4)
 }
+
+# ---- Bootstrap helpers -----------------------------------------------
+# Pure-R bootstrap of a scalar metric. Returns the point estimate, SE, and
+# percentile-method 95% confidence interval. Used by the Diagnostics card
+# in the Results Dashboard.
+bootstrap_metric <- function(actual, predicted,
+                              metric_fn = function(a, p)
+                                sqrt(mean((a - p)^2, na.rm = TRUE)),
+                              R = 200L, seed = 42L) {
+  ok <- complete.cases(actual, predicted)
+  a <- as.numeric(actual)[ok]; p <- as.numeric(predicted)[ok]
+  n <- length(a)
+  if (n < 5) return(list(estimate = NA_real_, se = NA_real_,
+                          lo = NA_real_, hi = NA_real_, R = 0L, n = n))
+  set.seed(seed)
+  vals <- numeric(R)
+  for (i in seq_len(R)) {
+    idx <- sample.int(n, n, replace = TRUE)
+    vals[i] <- tryCatch(metric_fn(a[idx], p[idx]), error = function(e) NA_real_)
+  }
+  vals <- vals[is.finite(vals)]
+  if (length(vals) < 10) return(list(estimate = metric_fn(a, p),
+                                       se = NA_real_, lo = NA_real_,
+                                       hi = NA_real_, R = length(vals), n = n))
+  q <- stats::quantile(vals, c(0.025, 0.975), na.rm = TRUE)
+  list(estimate = metric_fn(a, p),
+       se = stats::sd(vals, na.rm = TRUE),
+       lo = unname(q[1]), hi = unname(q[2]),
+       R = length(vals), n = n)
+}

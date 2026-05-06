@@ -109,39 +109,42 @@ predict_server <- function(id, state) {
 
     output$plot <- renderPlotly({
       d <- pred_data(); req(d)
+      pal <- plot_theme_palette(state, "qualitative", 3)
       if ("step" %in% names(d)) {
-        # Time series forecast
         hist_y <- as.numeric(state$prepped[[state$meta$target]])
         hist_x <- seq_along(hist_y)
         fc_x   <- max(hist_x) + d$step
         p <- plot_ly() |>
           add_lines(x = hist_x, y = hist_y, name = "History",
-                    line = list(color = "#c9d1d9")) |>
+                    line = list(color = pal[3])) |>
           add_lines(x = fc_x, y = d$predicted, name = "Forecast",
-                    line = list(color = "#3fb950"))
+                    line = list(color = pal[1]))
         if (!all(is.na(d$lower)))
           p <- p |> add_ribbons(x = fc_x, ymin = d$lower, ymax = d$upper,
                                 name = "PI",
-                                fillcolor = "rgba(63,185,80,0.2)",
+                                fillcolor = sprintf(
+                                  "rgba(%d,%d,%d,0.2)",
+                                  as.integer(grDevices::col2rgb(pal[1])[1, 1]),
+                                  as.integer(grDevices::col2rgb(pal[1])[2, 1]),
+                                  as.integer(grDevices::col2rgb(pal[1])[3, 1])),
                                 line = list(color = "transparent"))
-        p |> layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                    font = list(color = "#c9d1d9"),
-                    xaxis = list(title = "Time"),
-                    yaxis = list(title = state$meta$target))
+        plotly_apply_theme(p, state,
+          extra = list(xaxis = list(title = "Time"),
+                        yaxis = list(title = state$meta$target)))
       } else if ("actual" %in% names(d)) {
-        plot_ly(d, x = ~actual, y = ~predicted, type = "scatter",
-                mode = "markers",
-                marker = list(color = "#3fb950", opacity = 0.7)) |>
-          add_lines(x = ~actual, y = ~actual, name = "y=x",
-                    line = list(dash = "dash", color = "#888")) |>
-          layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                 font = list(color = "#c9d1d9"))
+        plotly_apply_theme(
+          plot_ly(d, x = ~actual, y = ~predicted, type = "scatter",
+                  mode = "markers",
+                  marker = list(color = pal[1], opacity = 0.7)) |>
+            add_lines(x = ~actual, y = ~actual, name = "y=x",
+                      line = list(dash = "dash", color = pal[3])),
+          state)
       } else {
-        plot_ly(x = seq_len(nrow(d)), y = d$predicted, type = "scatter",
-                mode = "lines+markers",
-                marker = list(color = "#3fb950")) |>
-          layout(paper_bgcolor = "#0d1117", plot_bgcolor = "#0d1117",
-                 font = list(color = "#c9d1d9"))
+        plotly_apply_theme(
+          plot_ly(x = seq_len(nrow(d)), y = d$predicted, type = "scatter",
+                  mode = "lines+markers",
+                  marker = list(color = pal[1])),
+          state)
       }
     })
 
